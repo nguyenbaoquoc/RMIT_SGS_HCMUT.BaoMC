@@ -125,7 +125,59 @@ export default function App() {
   // Per-patient pending unlock requests from doctors to patients
   const [requestsByPatient, setRequestsByPatient] = useState<
     Record<string, Record<string, DoctorUnlockRequest>>
-  >(() => ({}));
+  >(() => {
+    try {
+      const saved = localStorage.getItem('carepass_requests_v1');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore storage errors
+    }
+    return {};
+  });
+  const [requestSentBanner, setRequestSentBanner] = useState<string | null>(null);
+
+  // Real-time Cross-Tab Synchronization (so Doctor Tab <-> Patient Tab sync instantly!)
+  useEffect(() => {
+    try {
+      localStorage.setItem('carepass_requests_v1', JSON.stringify(requestsByPatient));
+    } catch {
+      // ignore
+    }
+  }, [requestsByPatient]);
+
+  useEffect(() => {
+    try {
+      const serialized: Record<string, string[]> = {};
+      Object.entries(authorizedByPatient).forEach(([pid, set]) => {
+        serialized[pid] = Array.from(set);
+      });
+      localStorage.setItem('carepass_authorized_v1', JSON.stringify(serialized));
+    } catch {
+      // ignore
+    }
+  }, [authorizedByPatient]);
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      try {
+        if (e.key === 'carepass_requests_v1' && e.newValue) {
+          setRequestsByPatient(JSON.parse(e.newValue));
+        }
+        if (e.key === 'carepass_authorized_v1' && e.newValue) {
+          const parsed = JSON.parse(e.newValue) as Record<string, string[]>;
+          const next: Record<string, Set<string>> = {};
+          Object.entries(parsed).forEach(([pid, arr]) => {
+            next[pid] = new Set(arr);
+          });
+          setAuthorizedByPatient(next);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const [decryptedViews, setDecryptedViews] = useState<Record<string, DecryptedRecordView>>({});
   const [clinicianErrors, setClinicianErrors] = useState<Record<string, string>>({});
@@ -257,6 +309,7 @@ export default function App() {
       if (!mounted) return;
       setEncryptedRows(rows);
       setClinicianErrors({});
+      setRequestSentBanner(null);
     }
     encryptCurrentPatientRecords();
     return () => {
@@ -316,6 +369,12 @@ export default function App() {
       },
     }));
 
+    setRequestSentBanner(
+      lang === 'vi'
+        ? `✅ Đã gửi chuông đỏ yêu cầu mở khóa [${row.vietnameseCategory}] tới BN ${currentPatient.name} (${currentPatient.id})!`
+        : `✅ Sent red bell unlock request for [${row.category}] to Patient ${currentPatient.nameEn} (${currentPatient.id})!`
+    );
+
     await appendAuditLog(
       'CLINICIAN_SWE',
       'HOLISTIC_REQUEST',
@@ -328,8 +387,11 @@ export default function App() {
   };
 
   const handleDoctorRequestAllRelated = async () => {
+    const sourceRows = encryptedRows.length > 0 ? encryptedRows : currentPatient.records;
     const currentReqs = { ...(requestsByPatient[currentPatient.id] || {}) };
-    for (const row of encryptedRows) {
+    let addedCount = 0;
+
+    for (const row of sourceRows) {
       if (!authorizedTags.has(row.tideTag) && !row.tideTag.endsWith(':private')) {
         currentReqs[row.tideTag] = {
           patientId: currentPatient.id,
@@ -342,12 +404,48 @@ export default function App() {
           reasonEn: `Dr. ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requested access to [${row.category}] to treat root-cause correlations for patient ${currentPatient.nameEn}.`,
           requestedAt: new Date().toLocaleTimeString(),
         };
+        addedCount++;
       }
     }
+
+    // Fallback: if all related records were ALREADY unlocked earlier, re-lock related & secondary
+    // and send fresh unlock requests so the button ALWAYS works when clicked!
+    if (addedCount === 0) {
+      const resetAuthorized = new Set<string>([`patient:${currentPatient.id.toLowerCase()}:primary`]);
+      setAuthorizedByPatient((prev) => ({
+        ...prev,
+        [currentPatient.id]: resetAuthorized,
+      }));
+
+      for (const row of sourceRows) {
+        if (!row.tideTag.endsWith(':primary') && !row.tideTag.endsWith(':private')) {
+          currentReqs[row.tideTag] = {
+            patientId: currentPatient.id,
+            tideTag: row.tideTag,
+            categoryVi: row.vietnameseCategory,
+            categoryEn: row.category,
+            doctorNameVi: activeDoctor.name,
+            doctorNameEn: activeDoctor.nameEn,
+            reasonVi: `BS. ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu mở khóa lại hồ sơ [${row.vietnameseCategory}] để điều trị tận gốc cho BN ${currentPatient.name}.`,
+            reasonEn: `Dr. ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requested access to [${row.category}] to treat root-cause correlations for patient ${currentPatient.nameEn}.`,
+            requestedAt: new Date().toLocaleTimeString(),
+          };
+          addedCount++;
+        }
+      }
+    }
+
     setRequestsByPatient((prev) => ({
       ...prev,
       [currentPatient.id]: currentReqs,
     }));
+
+    const totalReqs = Object.keys(currentReqs).length;
+    setRequestSentBanner(
+      lang === 'vi'
+        ? `✅ Đã gửi thành công ${totalReqs} yêu cầu mở khóa bệnh liên quan tới Bệnh nhân ${currentPatient.name} (${currentPatient.id})! Chuông đỏ thông báo đã bật sáng.`
+        : `✅ Successfully sent ${totalReqs} related record unlock requests to Patient ${currentPatient.nameEn} (${currentPatient.id})! Red bell alert is now active.`
+    );
 
     await appendAuditLog(
       'CLINICIAN_SWE',
@@ -456,6 +554,7 @@ export default function App() {
       delete copyForPatient[tideTag];
       if (Object.keys(copyForPatient).length === 0) {
         setShowBellModal(false);
+        setRequestSentBanner(null);
       }
       return { ...prev, [currentPatient.id]: copyForPatient };
     });
@@ -483,6 +582,7 @@ export default function App() {
       [currentPatient.id]: {},
     }));
     setShowBellModal(false);
+    setRequestSentBanner(null);
 
     await appendAuditLog(
       'PATIENT_SWE',
@@ -502,6 +602,7 @@ export default function App() {
       delete copyForPatient[tideTag];
       if (Object.keys(copyForPatient).length === 0) {
         setShowBellModal(false);
+        setRequestSentBanner(null);
       }
       return { ...prev, [currentPatient.id]: copyForPatient };
     });
@@ -2095,13 +2196,26 @@ export default function App() {
                 <div className="flex flex-wrap items-center gap-3 pt-0.5">
                   <button
                     onClick={handleDoctorRequestAllRelated}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all"
+                    className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold shadow-sm transition-all ${
+                      pendingCount > 0
+                        ? 'bg-amber-500 hover:bg-amber-600 text-white'
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                    }`}
                   >
-                    <Send className="w-4 h-4" />
-                    {t(
-                      '📨 Yêu cầu BN mở khóa các bệnh liên quan',
-                      '📨 Request Patient to Unlock Related Records'
+                    {pendingCount > 0 ? (
+                      <BellRing className="w-4 h-4 animate-bounce" />
+                    ) : (
+                      <Send className="w-4 h-4" />
                     )}
+                    {pendingCount > 0
+                      ? t(
+                          `🔔 Đã gửi yêu cầu mở khóa (${pendingCount} bệnh) tới BN ${pName(currentPatient)}`,
+                          `🔔 Sent Unlock Request (${pendingCount} records) to ${pName(currentPatient)}`
+                        )
+                      : t(
+                          '📨 Yêu cầu BN mở khóa các bệnh liên quan',
+                          '📨 Request Patient to Unlock Related Records'
+                        )}
                   </button>
 
                   {!isPrimaryMonitoringDoctor && (
@@ -2142,6 +2256,31 @@ export default function App() {
                         )}
                   </button>
                 </div>
+
+                {(requestSentBanner || pendingCount > 0) && (
+                  <div className="w-full px-4 py-2.5 rounded-xl bg-emerald-50 border border-emerald-300 text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-bold">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>
+                        {requestSentBanner ||
+                          t(
+                            `Đã gửi ${pendingCount} yêu cầu mở khóa bệnh liên quan tới Bệnh nhân ${currentPatient.name} (${currentPatient.id}).`,
+                            `Sent ${pendingCount} related record unlock requests to Patient ${currentPatient.nameEn} (${currentPatient.id}).`
+                          )}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setPortal('PATIENT');
+                        setShowBellModal(true);
+                      }}
+                      className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm"
+                    >
+                      <BellRing className="w-3 h-3 animate-bounce" />
+                      {t('Mở hộp thoại BN đồng ý ngay ➔', 'Open Patient Approval Modal ➔')}
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* SƠ ĐỒ KHÁM CỦA CÁC BÁC SĨ QUẢN LÝ & MỨC ĐỘ HOÀN THÀNH */}
