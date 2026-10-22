@@ -2,8 +2,11 @@ export type SensitivityLevel = 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL';
 
 export interface ClinicalMetric {
   label: string;
+  labelEn?: string;
   value: string;
+  valueEn?: string;
   unit?: string;
+  unitEn?: string;
   flag?: 'normal' | 'warning' | 'critical';
 }
 
@@ -20,10 +23,12 @@ export interface RawMedicalRecord {
   category: string;
   vietnameseCategory: string;
   title: string;
+  titleEn?: string;
   tideTag: string;
   sensitivity: SensitivityLevel;
   sensitivityLabel: string;
   facility: string;
+  facilityEn?: string;
   updatedAt: string;
   plaintextDiagnosis: string;
   vietnameseDiagnosis: string;

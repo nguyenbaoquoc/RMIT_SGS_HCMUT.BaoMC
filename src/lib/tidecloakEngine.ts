@@ -6,9 +6,11 @@ export interface EncryptedDatabaseRow {
   category: string;
   vietnameseCategory: string;
   title: string;
+  titleEn?: string;
   sensitivity: RawMedicalRecord['sensitivity'];
   sensitivityLabel: string;
   facility: string;
+  facilityEn?: string;
   updatedAt: string;
   algorithm: 'AES-256-GCM + Tide-PRE-Threshold';
   ivHex: string;
@@ -125,9 +127,11 @@ export async function doEncryptRecordWithTideTag(
     category: record.category,
     vietnameseCategory: record.vietnameseCategory,
     title: record.title,
+    titleEn: record.titleEn,
     sensitivity: record.sensitivity,
     sensitivityLabel: record.sensitivityLabel,
     facility: record.facility,
+    facilityEn: record.facilityEn,
     updatedAt: record.updatedAt,
     algorithm: 'AES-256-GCM + Tide-PRE-Threshold',
     ivHex,

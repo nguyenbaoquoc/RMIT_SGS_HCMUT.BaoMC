@@ -1,8 +1,18 @@
 import { RawMedicalRecord } from './mockMedicalRecords';
 
+export function toEnName(str: string): string {
+  return str
+    .replace(/BS\./g, 'Dr.')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D');
+}
+
 export interface HospitalDoctor {
   id: string;
   name: string;
+  nameEn: string;
   specialtyVi: string;
   specialtyEn: string;
   sweKey: string;
@@ -24,20 +34,28 @@ export interface PatientTimelineStep {
   detailVi: string;
   detailEn: string;
   doctorName: string;
+  doctorNameEn: string;
 }
 
 export interface DoctorCareStage {
   stageOrder: number;
   roleType: 'PRIMARY_MONITOR' | 'SPECIALIST_ROOT_CAUSE' | 'SPECIALIST_SECONDARY';
   roleLabelVi: string;
+  roleLabelEn: string;
   scopeBadgeVi: string;
+  scopeBadgeEn: string;
   doctorId: string;
   doctorName: string;
+  doctorNameEn: string;
   specialtyVi: string;
+  specialtyEn: string;
   targetTideTag: string;
   diseaseCategoryVi: string;
+  diseaseCategoryEn: string;
   diseaseTitleVi: string;
+  diseaseTitleEn: string;
   treatmentGoalVi: string;
+  treatmentGoalEn: string;
   isReferred: boolean;
   completionPercent: number;
 }
@@ -45,11 +63,13 @@ export interface DoctorCareStage {
 export interface PatientProfile {
   id: string;
   name: string;
+  nameEn: string;
   age: number;
   genderVi: 'Nam' | 'Nữ';
   genderEn: 'Male' | 'Female';
   primaryDoctorId: string;
   primaryDoctorName: string;
+  primaryDoctorNameEn: string;
   primarySpecialtyVi: string;
   primarySpecialtyEn: string;
   coDoctorsVi: string;
@@ -68,6 +88,7 @@ export const HOSPITAL_DOCTORS: HospitalDoctor[] = [
   {
     id: 'DOC-01',
     name: 'BS. Alice Nguyễn',
+    nameEn: 'Dr. Alice Nguyen',
     specialtyVi: 'Khoa Tim Mạch & Huyết Áp',
     specialtyEn: 'Cardiology & Hypertension',
     sweKey: '#SWE-DOC-8842',
@@ -76,6 +97,7 @@ export const HOSPITAL_DOCTORS: HospitalDoctor[] = [
   {
     id: 'DOC-02',
     name: 'BS. Trần Minh',
+    nameEn: 'Dr. Tran Minh',
     specialtyVi: 'Khoa Tâm Thần & Giấc Ngủ',
     specialtyEn: 'Psychiatry & Sleep Medicine',
     sweKey: '#SWE-DOC-3109',
@@ -84,6 +106,7 @@ export const HOSPITAL_DOCTORS: HospitalDoctor[] = [
   {
     id: 'DOC-03',
     name: 'BS. Phạm Hùng',
+    nameEn: 'Dr. Pham Hung',
     specialtyVi: 'Khoa Nội Tiết & Chuyển Hóa',
     specialtyEn: 'Endocrinology & Metabolism',
     sweKey: '#SWE-DOC-5521',
@@ -92,6 +115,7 @@ export const HOSPITAL_DOCTORS: HospitalDoctor[] = [
   {
     id: 'DOC-04',
     name: 'BS. Lê Hoàng',
+    nameEn: 'Dr. Le Hoang',
     specialtyVi: 'Khoa Cơ Xương Khớp',
     specialtyEn: 'Orthopedics & Rheumatology',
     sweKey: '#SWE-DOC-7740',
@@ -100,6 +124,7 @@ export const HOSPITAL_DOCTORS: HospitalDoctor[] = [
   {
     id: 'DOC-05',
     name: 'BS. Vũ Thảo',
+    nameEn: 'Dr. Vu Thao',
     specialtyVi: 'Khoa Tiêu Hóa & Gan Mật',
     specialtyEn: 'Gastroenterology & Hepatology',
     sweKey: '#SWE-DOC-9914',
@@ -108,6 +133,7 @@ export const HOSPITAL_DOCTORS: HospitalDoctor[] = [
   {
     id: 'DOC-06',
     name: 'BS. Đặng Khoa',
+    nameEn: 'Dr. Dang Khoa',
     specialtyVi: 'Khoa Hô Hấp & Thần Kinh',
     specialtyEn: 'Pulmonology & Neurology',
     sweKey: '#SWE-DOC-6208',
@@ -938,25 +964,254 @@ function resolveSpecialistDoctor(categoryText: string, excludeIds: string[]): Ho
   );
 }
 
+const MEDICAL_VI_TO_EN_PAIRS: Array<[string, string]> = [
+  ['Cần hội chẩn liên khoa', 'Cross-Specialty Consultation'],
+  ['Đang theo dõi tích cực', 'Active Clinical Monitoring'],
+  ['Điều trị ngoại trú', 'Outpatient Care'],
+  ['Tái khám định kỳ', 'Routine Follow-up'],
+  ['Khoa Tim mạch', 'Cardiology Dept'],
+  ['Khoa Tâm thần', 'Psychiatry Dept'],
+  ['Khoa Nội tiết', 'Endocrinology Dept'],
+  ['Khoa Xương khớp', 'Orthopedics Dept'],
+  ['Khoa Tiêu hóa', 'Gastroenterology Dept'],
+  ['Khoa Hô hấp', 'Pulmonology Dept'],
+  ['Khoa Thần kinh', 'Neurology Dept'],
+  ['Khoa Gan mật', 'Hepatology Dept'],
+  ['Khoa Thận', 'Nephrology Dept'],
+  ['Khoa Huyết học', 'Hematology Dept'],
+  ['Tim mạch & Huyết áp (Đang theo dõi)', 'Cardiology & Hypertension (Primary Monitoring)'],
+  ['Tim mạch (Đang theo dõi)', 'Cardiology (Primary Monitoring)'],
+  ['Nội tiết & Đái tháo đường (Đang theo dõi)', 'Endocrinology & Diabetes (Primary Monitoring)'],
+  ['Nội tiết (Đang theo dõi)', 'Endocrinology (Primary Monitoring)'],
+  ['Tiêu hóa & Dạ dày (Đang theo dõi)', 'Gastroenterology & Stomach (Primary Monitoring)'],
+  ['Tiêu hóa (Đang theo dõi)', 'Gastroenterology (Primary Monitoring)'],
+  ['Hô hấp & Phổi (Đang theo dõi)', 'Pulmonology & Lungs (Primary Monitoring)'],
+  ['Hô hấp (Đang theo dõi)', 'Pulmonology (Primary Monitoring)'],
+  ['Cơ xương khớp (Đang theo dõi)', 'Orthopedics & Rheumatology (Primary Monitoring)'],
+  ['Cơ xương khớp & Miễn dịch (Đang theo dõi)', 'Rheumatology & Immunology (Primary Monitoring)'],
+  ['Tâm thần học (Đang theo dõi)', 'Psychiatry (Primary Monitoring)'],
+  ['Tâm thần & Giấc ngủ (Đang theo dõi)', 'Psychiatry & Sleep Medicine (Primary Monitoring)'],
+  ['Thần kinh (Đang theo dõi)', 'Neurology (Primary Monitoring)'],
+  ['Tâm thần học (Bệnh gốc gây Béo phì)', 'Psychiatry (Root Cause of Obesity)'],
+  ['Tiêu hóa & Gan mật (Biến chứng liên quan)', 'Gastroenterology & Hepatology (Related Complication)'],
+  ['Cơ xương khớp (Nguyên nhân dùng thuốc gây loét)', 'Orthopedics (NSAID Root Cause of Ulcer)'],
+  ['Tiêu hóa (Bệnh gốc gây Hen ban đêm)', 'Gastroenterology (GERD Root Cause of Nocturnal Asthma)'],
+  ['Nội tiết & Tuyến giáp (Nguyên nhân gốc)', 'Endocrinology & Thyroid (Root Cause)'],
+  ['Tiêu hóa & Đại tràng (Bệnh tự miễn đi kèm)', 'Gastroenterology & Colon (Autoimmune Comorbidity)'],
+  ['Thần kinh (Bệnh đi kèm)', 'Neurology (Associated Condition)'],
+  ['Hô hấp & Giấc ngủ (Nguyên nhân gốc)', 'Sleep & Pulmonology (Root Cause)'],
+  ['Tâm thần học (Triệu chứng chồng lấp)', 'Psychiatry (Overlapping Symptoms)'],
+  ['Nội tiết & Biến chứng Thần kinh (Nguyên nhân gốc)', 'Endocrinology & Neuropathy (Root Cause)'],
+  ['Tâm thần học (Nguyên nhân kích hoạt Trục Não - Ruột)', 'Psychiatry (Brain-Gut Axis Trigger)'],
+  ['Tim mạch (Nguồn gốc gây huyết khối lên não)', 'Cardiology (Cardioembolic Source)'],
+  ['Thận & Tiết niệu (Biến chứng cần phát hiện sớm)', 'Nephrology & Urology (Early Complication)'],
+  ['Tiêu hóa & Gan mật (Cảnh báo suy giảm chuyển hóa thuốc)', 'Hepatology (Impaired Drug Metabolism Alert)'],
+  ['Nội tiết (Nguyên nhân gốc làm rỗng xương)', 'Endocrinology (Root Cause of Bone Loss)'],
+  ['Cơ xương khớp & Chuyển hóa (Tránh kê nhầm thuốc lợi tiểu)', 'Rheumatology & Metabolism (Medication Safety)'],
+  ['Tiêu hóa (Nguyên nhân gốc gây kém hấp thu Sắt & B12)', 'Gastroenterology (Malabsorption Root Cause)'],
+  ['Tim mạch (Biểu hiện Tăng huyết áp thứ phát & Nguy cơ loạn nhịp)', 'Cardiology (Secondary Hypertension & Arrhythmia Risk)'],
+  ['Nội tiết & Phụ khoa (Hệ quả từ tăng Cortisol)', 'Endocrinology & Gynecology (Cortisol Effect)'],
+  ['Nội tiết & Cơ xương khớp (Tác dụng phụ do dùng Corticoid)', 'Endocrinology & Orthopedics (Steroid Side Effects)'],
+  ['Cơ xương khớp (Hệ quả tăng cân)', 'Orthopedics (Weight-Gain Overload)'],
+  ['Tim mạch & Mỡ máu', 'Cardiology & Lipid Profile'],
+  ['Thận & Tiết niệu', 'Nephrology & Urology'],
+  ['Tai Mũi Họng', 'Otolaryngology (ENT)'],
+  ['Tâm thần & Giấc ngủ', 'Psychiatry & Sleep Medicine'],
+  ['Mắt & Nhãn khoa', 'Ophthalmology'],
+  ['Tim mạch', 'Cardiology'],
+  ['Nội tiết & Chuyển hóa', 'Endocrinology & Metabolism'],
+  ['Cơ xương khớp', 'Orthopedics & Rheumatology'],
+  ['Mắt & Võng mạc', 'Ophthalmology & Retina'],
+  ['Dinh dưỡng', 'Clinical Nutrition'],
+  ['Nội tiết & Mỡ máu', 'Endocrinology & Lipids'],
+  ['Huyết học', 'Hematology'],
+  ['Thần kinh', 'Neurology'],
+  ['Nam khoa & Nội tiết', 'Andrology & Endocrinology'],
+  ['Thận & Điện giải', 'Nephrology & Electrolytes'],
+  ['NGUYÊN NHÂN GỐC:', 'ROOT CAUSE IDENTIFIED:'],
+  ['BỆNH LIÊN QUAN TRỰC TIẾP:', 'DIRECT CLINICAL CORRELATION:'],
+  ['BỆNH LIÊN QUAN:', 'RELATED CONDITION:'],
+  ['LIÊN KẾT QUAN TRỌNG:', 'KEY CLINICAL LINK:'],
+  ['LIÊN KẾT SỐNG CÒN:', 'CRITICAL CLINICAL LINK:'],
+  ['CẢNH BÁO AN TOÀN KÊ ĐƠN:', 'PRESCRIPTION SAFETY ALERT:'],
+  ['CẢNH BÁO ĐỘT QUỴ:', 'STROKE RISK ALERT:'],
+  ['CẢNH BÁO ĐỘC GAN:', 'HEPATOTOXICITY ALERT:'],
+  ['CẢNH BÁO NGUY HIỂM:', 'CRITICAL MEDICAL ALERT:'],
+  ['Cảnh báo An toàn Thuốc:', 'Medication Safety Alert:'],
+  ['Cảnh báo Điều trị:', 'Treatment Alert:'],
+  ['Tối ưu Đơn thuốc:', 'Prescription Optimization:'],
+  ['Phát hiện bệnh', 'Detected condition'],
+  ['Phát hiện chứng', 'Detected symptom'],
+  ['Phát hiện ổ', 'Detected lesion'],
+  ['Phát hiện nguyên nhân gốc của', 'Detected root cause of'],
+  ['Phát hiện liên kết trực tiếp giữa', 'Detected direct correlation between'],
+  ['Phát hiện tương tác thuốc giữa', 'Detected drug interaction between'],
+  ['Phát hiện bệnh nhân', 'Detected patient with'],
+  ['Phát hiện', 'Detected'],
+  ['có nguyên nhân gốc từ hồ sơ', 'originates from locked record'],
+  ['bắt nguồn trực tiếp từ hồ sơ', 'stems directly from locked record'],
+  ['bắt nguồn từ thuốc kháng viêm trong hồ sơ', 'is triggered by NSAIDs in locked record'],
+  ['có liên quan mật thiết với hồ sơ', 'is closely linked to locked record'],
+  ['nằm trong hồ sơ', 'is recorded inside locked record'],
+  ['trong hồ sơ', 'in locked record'],
+  ['đang khóa', '(currently locked)'],
+  ['Trầm cảm kéo dài', 'Chronic Depression'],
+  ['Ăn đêm tăng 14kg', 'Late-night stress-eating (+14kg)'],
+  ['Béo phì', 'Obesity'],
+  ['Cao huyết áp', 'Hypertension'],
+  ['Tăng huyết áp', 'Hypertension'],
+  ['Đau lưng', 'Lumbar Back Pain'],
+  ['Nhịp nhanh xoang', 'Sinus Tachycardia'],
+  ['Nhịp tim nhanh', 'Tachycardia'],
+  ['Tim đập nhanh', 'Tachycardia'],
+  ['Đánh trống ngực', 'Palpitations'],
+  ['Run tay', 'Hand Tremor'],
+  ['Rối loạn lo âu giả định', 'Pseudo-Anxiety Disorder'],
+  ['Rối loạn lo âu', 'Anxiety Disorder'],
+  ['Cường giáp Basedow', 'Graves Hyperthyroidism'],
+  ['Tăng hormone tuyến giáp', 'Elevated Thyroid Hormone'],
+  ['Suy giáp Hashimoto', 'Hashimoto Hypothyroidism'],
+  ['Đái tháo đường Tuýp 2', 'Type 2 Diabetes Mellitus'],
+  ['Đái tháo đường', 'Diabetes Mellitus'],
+  ['Kháng Insulin', 'Insulin Resistance'],
+  ['Gan nhiễm mỡ', 'Fatty Liver Disease'],
+  ['Rối loạn mỡ máu', 'Dyslipidemia'],
+  ['Rối loạn Lipid máu', 'Dyslipidemia'],
+  ['Viêm khớp Gout', 'Gouty Arthritis'],
+  ['Loét hang vị dạ dày', 'Gastric Antral Ulcer'],
+  ['Viêm loét hang vị dạ dày', 'Acute Gastric Ulcer'],
+  ['Thiếu máu', 'Anemia'],
+  ['Trào ngược dạ dày thực quản', 'Gastroesophageal Reflux (GERD)'],
+  ['Co thắt phế quản', 'Bronchospasm'],
+  ['Hen suyễn', 'Bronchial Asthma'],
+  ['Hen phế quản', 'Bronchial Asthma'],
+  ['Ho kéo dài về đêm', 'Chronic Nocturnal Cough'],
+  ['Viêm cột sống dính khớp', 'Ankylosing Spondylitis'],
+  ['Viêm đại tràng mạn tính', 'Chronic Colitis'],
+  ['Viêm loét đại trực tràng', 'Ulcerative Colitis'],
+  ['Rối loạn hoảng sợ', 'Panic Disorder'],
+  ['Đau nửa đầu Migraine', 'Migraine Headache'],
+  ['Hội chứng Ngưng thở khi ngủ', 'Obstructive Sleep Apnea'],
+  ['Ngưng thở khi ngủ', 'Sleep Apnea'],
+  ['Hội chứng ruột kích thích', 'Irritable Bowel Syndrome'],
+  ['Cơn thiếu máu não thoáng qua', 'Transient Ischemic Attack'],
+  ['Rung nhĩ cơn', 'Paroxysmal Atrial Fibrillation'],
+  ['Bệnh Lupus ban đỏ hệ thống', 'Systemic Lupus Erythematosus'],
+  ['Viêm cầu thận Lupus', 'Lupus Nephritis'],
+  ['Mất ngủ mạn tính', 'Chronic Insomnia'],
+  ['Mất ngủ kéo dài', 'Chronic Insomnia'],
+  ['Viêm gan do rượu', 'Alcoholic Hepatitis'],
+  ['Loãng xương nặng', 'Severe Osteoporosis'],
+  ['Loãng xương', 'Osteoporosis'],
+  ['Cường tuyến cận giáp', 'Primary Hyperparathyroidism'],
+  ['Cường cận giáp', 'Hyperparathyroidism'],
+  ['Sỏi thận', 'Kidney Stones'],
+  ['Hội chứng chuyển hóa', 'Metabolic Syndrome'],
+  ['Chóng mặt mạn tính', 'Chronic Vertigo'],
+  ['Viêm dạ dày', 'Chronic Gastritis'],
+  ['Hạ Kali máu', 'Hypokalemia'],
+  ['U tuyến thượng thận', 'Adrenal Adenoma'],
+  ['Trầm cảm sau sinh', 'Postpartum Depression'],
+  ['Bệnh phổi tắc nghẽn mạn tính', 'Chronic Obstructive Pulmonary Disease'],
+  ['Tăng đường huyết', 'Hyperglycemia'],
+  ['Huyết áp', 'Blood Pressure'],
+  ['Nhịp tim', 'Heart Rate'],
+  ['Chỉ số BMI', 'BMI Index'],
+  ['Điểm PHQ-9', 'PHQ-9 Score'],
+  ['Tăng cân', 'Weight Gain'],
+  ['Sụt cân', 'Weight Loss'],
+  ['Thuốc SSRI', 'SSRI Medication'],
+  ['Đường huyết đói', 'Fasting Glucose'],
+  ['Men gan', 'Liver Enzyme'],
+  ['Dương tính', 'Positive'],
+  ['Âm tính', 'Negative'],
+  ['Bình thường', 'Normal'],
+  ['Nặng', 'Severe'],
+  ['Cao', 'High'],
+  ['Thấp', 'Low'],
+  ['Ổn định', 'Stable'],
+  ['1 viên sáng', '1 tablet morning'],
+  ['1 viên tối', '1 tablet evening'],
+  ['1 viên chiều', '1 tablet afternoon'],
+  ['2 viên/ngày', '2 tablets/day'],
+  ['1 viên/ngày', '1 tablet/day'],
+  ['1 viên/tuần', '1 tablet/week'],
+  ['2 viên sáng', '2 tablets morning'],
+  ['trước ăn sáng 30p', '30m before breakfast'],
+  ['trước ăn tối', 'before dinner'],
+  ['sau ăn tối', 'after dinner'],
+  ['Hạ nhịp tim', 'Heart rate control'],
+  ['Ổn định huyết áp', 'BP stabilization'],
+  ['Hạ huyết áp', 'BP reduction'],
+  ['Kiểm soát huyết áp', 'BP control'],
+  ['Trị trầm cảm & ăn đêm', 'Treats depression & night eating'],
+  ['Hạ đường huyết', 'Lowers blood glucose'],
+  ['Kiểm soát đường huyết', 'Glycemic control'],
+  ['Hạ mỡ máu', 'Lipid lowering'],
+];
+
+export function toEnMedical(text: string): string {
+  if (!text) return '';
+  let out = text;
+  for (const [vi, en] of MEDICAL_VI_TO_EN_PAIRS) {
+    out = out.split(vi).join(en);
+  }
+  out = out
+    .replace(/BS\./g, 'Dr.')
+    .replace(/\(Tâm thần\)/g, '(Psychiatry)')
+    .replace(/\(Xương khớp\)/g, '(Orthopedics)')
+    .replace(/\(Tim mạch\)/g, '(Cardiology)')
+    .replace(/\(Tiêu hóa\)/g, '(Gastroenterology)')
+    .replace(/\(Giấc ngủ\)/g, '(Sleep Medicine)')
+    .replace(/\(Nội tiết\)/g, '(Endocrinology)')
+    .replace(/\(Thần kinh\)/g, '(Neurology)')
+    .replace(/\(Hô hấp\)/g, '(Pulmonology)')
+    .replace(/\(Gan mật\)/g, '(Hepatology)')
+    .replace(/\(Dinh dưỡng\)/g, '(Nutrition)');
+  return toEnName(out);
+}
+
 export const ALL_20_PATIENTS: PatientProfile[] = SEED_PATIENTS.map((s, idx) => {
   const doc = HOSPITAL_DOCTORS[s.docIndex];
   const tagPrefix = `patient:${s.id.toLowerCase()}`;
   const specialistRootDoc = resolveSpecialistDoctor(s.relatedCatVi, [doc.id]);
   const specialistSecDoc = resolveSpecialistDoctor(s.thirdCatVi, [doc.id, specialistRootDoc.id]);
 
+  const primaryCatEn = toEnMedical(s.primaryCatVi);
+  const primaryTitleEn = toEnMedical(s.primaryTitle);
+  const primaryDiagEn = `Clinical Assessment (${toEnName(s.name)}): ${toEnMedical(s.primaryTitle)}. Primary monitoring by ${doc.nameEn} (${doc.specialtyEn}). Requires cross-specialty root-cause evaluation.`;
+  const primaryPlanEn = toEnMedical(s.primaryPlanVi);
+
+  const relatedCatEn = toEnMedical(s.relatedCatVi);
+  const relatedTitleEn = toEnMedical(s.relatedTitle);
+  const relatedDiagEn = `ROOT CAUSE IDENTIFIED: ${toEnMedical(s.relatedTitle)} directly drives the patient's primary condition (${toEnMedical(s.primaryTitle)}). Specialist care assigned to ${specialistRootDoc.nameEn} (${specialistRootDoc.specialtyEn}).`;
+  const relatedPlanEn = toEnMedical(s.relatedPlanVi);
+
+  const thirdCatEn = toEnMedical(s.thirdCatVi);
+  const thirdTitleEn = toEnMedical(s.thirdTitle);
+  const thirdDiagEn = `Secondary associated condition: ${toEnMedical(s.thirdTitle)}. Managed in coordination with ${specialistSecDoc.nameEn} (${specialistSecDoc.specialtyEn}).`;
+  const thirdPlanEn = toEnMedical(s.thirdPlanVi);
+
   const careStages: DoctorCareStage[] = [
     {
       stageOrder: 1,
       roleType: 'PRIMARY_MONITOR',
       roleLabelVi: 'Bác sĩ Theo dõi Chính (Quản lý Tổng thể)',
+      roleLabelEn: 'Primary Monitoring Doctor (Holistic Care)',
       scopeBadgeVi: 'Xem được nhiều bệnh (khi BN mở khóa)',
+      scopeBadgeEn: 'Multi-disease view (when unlocked by patient)',
       doctorId: doc.id,
       doctorName: doc.name,
+      doctorNameEn: doc.nameEn,
       specialtyVi: doc.specialtyVi,
+      specialtyEn: doc.specialtyEn,
       targetTideTag: `${tagPrefix}:primary`,
       diseaseCategoryVi: s.primaryCatVi,
+      diseaseCategoryEn: primaryCatEn,
       diseaseTitleVi: s.primaryTitle,
+      diseaseTitleEn: primaryTitleEn,
       treatmentGoalVi: s.primaryPlanVi,
+      treatmentGoalEn: primaryPlanEn,
       isReferred: true,
       completionPercent: 70 + ((idx * 7) % 25),
     },
@@ -964,15 +1219,21 @@ export const ALL_20_PATIENTS: PatientProfile[] = SEED_PATIENTS.map((s, idx) => {
       stageOrder: 2,
       roleType: 'SPECIALIST_ROOT_CAUSE',
       roleLabelVi: 'Bác sĩ Chuyên khoa Điều trị Bệnh gốc',
+      roleLabelEn: 'Specialist Doctor (Root-Cause Treatment)',
       scopeBadgeVi: 'Chỉ xem đúng 1 bệnh chuyên khoa này',
+      scopeBadgeEn: 'Scoped to ONLY this 1 specialty disease',
       doctorId: specialistRootDoc.id,
       doctorName: specialistRootDoc.name,
+      doctorNameEn: specialistRootDoc.nameEn,
       specialtyVi: specialistRootDoc.specialtyVi,
+      specialtyEn: specialistRootDoc.specialtyEn,
       targetTideTag: `${tagPrefix}:related`,
       diseaseCategoryVi: s.relatedCatVi,
+      diseaseCategoryEn: relatedCatEn,
       diseaseTitleVi: s.relatedTitle,
+      diseaseTitleEn: relatedTitleEn,
       treatmentGoalVi: s.relatedPlanVi,
-      // Pre-refer several patients so every doctor has specialist cases immediately; BN-101 starts ready to refer or already active
+      treatmentGoalEn: relatedPlanEn,
       isReferred: idx % 2 === 1,
       completionPercent: idx % 2 === 1 ? 55 + ((idx * 9) % 35) : 20,
     },
@@ -980,14 +1241,21 @@ export const ALL_20_PATIENTS: PatientProfile[] = SEED_PATIENTS.map((s, idx) => {
       stageOrder: 3,
       roleType: 'SPECIALIST_SECONDARY',
       roleLabelVi: 'Bác sĩ Chuyên khoa Điều trị Thứ phát',
+      roleLabelEn: 'Specialist Doctor (Secondary Condition)',
       scopeBadgeVi: 'Chỉ xem đúng 1 bệnh chuyên khoa này',
+      scopeBadgeEn: 'Scoped to ONLY this 1 specialty disease',
       doctorId: specialistSecDoc.id,
       doctorName: specialistSecDoc.name,
+      doctorNameEn: specialistSecDoc.nameEn,
       specialtyVi: specialistSecDoc.specialtyVi,
+      specialtyEn: specialistSecDoc.specialtyEn,
       targetTideTag: `${tagPrefix}:secondary`,
       diseaseCategoryVi: s.thirdCatVi,
+      diseaseCategoryEn: thirdCatEn,
       diseaseTitleVi: s.thirdTitle,
+      diseaseTitleEn: thirdTitleEn,
       treatmentGoalVi: s.thirdPlanVi,
+      treatmentGoalEn: thirdPlanEn,
       isReferred: idx % 3 === 0,
       completionPercent: idx % 3 === 0 ? 50 + ((idx * 11) % 40) : 15,
     },
@@ -996,48 +1264,58 @@ export const ALL_20_PATIENTS: PatientProfile[] = SEED_PATIENTS.map((s, idx) => {
   const records: RawMedicalRecord[] = [
     {
       id: `${s.id}-REC-1`,
-      category: s.primaryCatVi,
+      category: primaryCatEn,
       vietnameseCategory: s.primaryCatVi,
       title: s.primaryTitle,
+      titleEn: primaryTitleEn,
       tideTag: `${tagPrefix}:primary`,
       sensitivity: 'MODERATE',
-      sensitivityLabel: 'Bệnh đang theo dõi chính',
+      sensitivityLabel: 'Primary Monitored Condition',
       facility: `CarePass Hospital — ${doc.specialtyVi}`,
+      facilityEn: `CarePass Hospital — ${doc.specialtyEn}`,
       updatedAt: '2026-10-20',
-      plaintextDiagnosis: s.primaryDiagVi,
+      plaintextDiagnosis: primaryDiagEn,
       vietnameseDiagnosis: s.primaryDiagVi,
-      medicationOrPlan: s.primaryPlanVi,
+      medicationOrPlan: primaryPlanEn,
       vietnamesePlan: s.primaryPlanVi,
       metrics: s.primaryMetrics.map((m) => ({
         label: m.label,
+        labelEn: toEnMedical(m.label),
         value: m.value,
+        valueEn: toEnMedical(m.value),
         unit: m.unit,
+        unitEn: toEnMedical(m.unit),
         flag: 'warning',
       })),
     },
     {
       id: `${s.id}-REC-2`,
-      category: s.relatedCatVi,
+      category: relatedCatEn,
       vietnameseCategory: s.relatedCatVi,
       title: s.relatedTitle,
+      titleEn: relatedTitleEn,
       tideTag: `${tagPrefix}:related`,
       sensitivity: 'HIGH',
-      sensitivityLabel: 'Bệnh liên quan / Nguyên nhân gốc',
+      sensitivityLabel: 'Root-Cause Related Condition',
       facility: 'Chuyên khoa Phối hợp Liên Viện',
+      facilityEn: `Inter-Department Specialty (${specialistRootDoc.specialtyEn})`,
       updatedAt: '2026-10-12',
-      plaintextDiagnosis: s.relatedDiagVi,
+      plaintextDiagnosis: relatedDiagEn,
       vietnameseDiagnosis: s.relatedDiagVi,
-      medicationOrPlan: s.relatedPlanVi,
+      medicationOrPlan: relatedPlanEn,
       vietnamesePlan: s.relatedPlanVi,
       metrics: s.relatedMetrics.map((m) => ({
         label: m.label,
+        labelEn: toEnMedical(m.label),
         value: m.value,
+        valueEn: toEnMedical(m.value),
         unit: m.unit,
+        unitEn: toEnMedical(m.unit),
         flag: 'critical',
       })),
       correlationSignal: {
         viSummary: s.correlationAlertVi,
-        enSummary: s.correlationAlertVi,
+        enSummary: `🔗 Cross-Specialty Root-Cause Alert: Locked [${relatedCatEn}] record (${relatedTitleEn}) is directly linked to [${primaryTitleEn}].`,
         linkedTags: [`${tagPrefix}:primary`, `${tagPrefix}:related`],
         clinicalActionVi:
           'Bác sĩ có thể gửi yêu cầu xin Bệnh nhân mở khóa hồ sơ này để điều trị tận gốc.',
@@ -1047,44 +1325,96 @@ export const ALL_20_PATIENTS: PatientProfile[] = SEED_PATIENTS.map((s, idx) => {
     },
     {
       id: `${s.id}-REC-3`,
-      category: s.thirdCatVi,
+      category: thirdCatEn,
       vietnameseCategory: s.thirdCatVi,
       title: s.thirdTitle,
+      titleEn: thirdTitleEn,
       tideTag: `${tagPrefix}:secondary`,
       sensitivity: 'LOW',
-      sensitivityLabel: 'Bệnh đi kèm thứ phát',
+      sensitivityLabel: 'Secondary Associated Condition',
       facility: 'Trung tâm Chẩn đoán Hình ảnh & Xét nghiệm',
+      facilityEn: 'Diagnostic Imaging & Laboratory Center',
       updatedAt: '2026-09-18',
-      plaintextDiagnosis: s.thirdDiagVi,
+      plaintextDiagnosis: thirdDiagEn,
       vietnameseDiagnosis: s.thirdDiagVi,
-      medicationOrPlan: s.thirdPlanVi,
+      medicationOrPlan: thirdPlanEn,
       vietnamesePlan: s.thirdPlanVi,
       metrics: [
-        { label: 'Mức độ liên quan', value: 'Có liên hệ', unit: 'Thứ phát', flag: 'warning' },
-        { label: 'Theo dõi', value: 'Định kỳ', unit: 'Ngoại trú', flag: 'normal' },
-        { label: 'Bảo mật E2EE', value: 'AES-256', unit: 'TideCloak', flag: 'normal' },
+        {
+          label: 'Mức độ liên quan',
+          labelEn: 'Clinical Link',
+          value: 'Có liên hệ',
+          valueEn: 'Correlated',
+          unit: 'Thứ phát',
+          unitEn: 'Secondary',
+          flag: 'warning',
+        },
+        {
+          label: 'Theo dõi',
+          labelEn: 'Follow-up',
+          value: 'Định kỳ',
+          valueEn: 'Periodic',
+          unit: 'Ngoại trú',
+          unitEn: 'Outpatient',
+          flag: 'normal',
+        },
+        {
+          label: 'Bảo mật E2EE',
+          labelEn: 'E2EE Security',
+          value: 'AES-256',
+          valueEn: 'AES-256',
+          unit: 'TideCloak',
+          unitEn: 'TideCloak',
+          flag: 'normal',
+        },
       ],
     },
     {
       id: `${s.id}-REC-4`,
-      category: 'Di truyền & Sàng lọc Riêng tư (Tối mật)',
+      category: 'Genetics & Private Serology Screening (Confidential)',
       vietnameseCategory: 'Di truyền & Sàng lọc Riêng tư (Tối mật)',
       title: 'Hồ sơ Gen di truyền gia đình & Xét nghiệm Huyết thanh học riêng tư',
+      titleEn: 'Family Genomic Sequencing & Confidential Serology Screening',
       tideTag: `${tagPrefix}:private`,
       sensitivity: 'CRITICAL',
-      sensitivityLabel: 'Riêng tư tuyệt đối',
+      sensitivityLabel: 'Strictly Confidential',
       facility: 'Viện Di truyền & Sinh học Phân tử',
+      facilityEn: 'Institute of Medical Genetics & Molecular Biology',
       updatedAt: '2026-08-05',
       plaintextDiagnosis:
-        'HỒ SƠ CÁ NHÂN TỐI MẬT: Kết quả giải trình tự gen tầm soát ung thư di truyền & sàng lọc HIV/HBV. Không liên quan trực tiếp đến ca điều trị hiện tại nên bệnh nhân có quyền giữ khóa hoàn toàn.',
+        'STRICTLY CONFIDENTIAL RECORD: Hereditary oncology genomic panel & HIV/HBV serology screening. Unrelated to the active treatment episode; remains 100% sealed under patient sovereignty.',
       vietnameseDiagnosis:
         'HỒ SƠ CÁ NHÂN TỐI MẬT: Kết quả giải trình tự gen tầm soát ung thư di truyền & sàng lọc HIV/HBV. Không liên quan trực tiếp đến ca điều trị hiện tại nên bệnh nhân có quyền giữ khóa hoàn toàn.',
-      medicationOrPlan: 'Chỉ mở khóa khi khám chuyên khoa Di truyền / Ung bướu',
+      medicationOrPlan: 'Unlock only for dedicated Genetics / Oncology consultation',
       vietnamesePlan: 'Chỉ mở khóa khi khám chuyên khoa Di truyền / Ung bướu',
       metrics: [
-        { label: 'Mức độ bảo mật', value: 'Tối mật', unit: 'Zero-Trust', flag: 'critical' },
-        { label: 'HIV / HBV', value: 'Âm tính', unit: 'Đã xác thực', flag: 'normal' },
-        { label: 'Liên quan ca bệnh', value: '0%', unit: 'Độc lập', flag: 'normal' },
+        {
+          label: 'Mức độ bảo mật',
+          labelEn: 'Security Tier',
+          value: 'Tối mật',
+          valueEn: 'Top Secret',
+          unit: 'Zero-Trust',
+          unitEn: 'Zero-Trust',
+          flag: 'critical',
+        },
+        {
+          label: 'HIV / HBV',
+          labelEn: 'HIV / HBV',
+          value: 'Âm tính',
+          valueEn: 'Negative',
+          unit: 'Đã xác thực',
+          unitEn: 'Verified',
+          flag: 'normal',
+        },
+        {
+          label: 'Liên quan ca bệnh',
+          labelEn: 'Case Relevance',
+          value: '0%',
+          valueEn: '0%',
+          unit: 'Độc lập',
+          unitEn: 'Independent',
+          flag: 'normal',
+        },
       ],
     },
   ];
@@ -1093,51 +1423,56 @@ export const ALL_20_PATIENTS: PatientProfile[] = SEED_PATIENTS.map((s, idx) => {
     {
       date: '20/10/2026',
       titleVi: s.primaryTitle,
-      titleEn: s.primaryTitle,
+      titleEn: primaryTitleEn,
       detailVi: s.primaryDiagVi,
-      detailEn: s.primaryDiagVi,
+      detailEn: primaryDiagEn,
       doctorName: `${doc.name} (${doc.specialtyVi})`,
+      doctorNameEn: `${doc.nameEn} (${doc.specialtyEn})`,
     },
     {
       date: '12/10/2026',
       titleVi: s.relatedTitle,
-      titleEn: s.relatedTitle,
+      titleEn: relatedTitleEn,
       detailVi: s.relatedDiagVi,
-      detailEn: s.relatedDiagVi,
+      detailEn: relatedDiagEn,
       doctorName: s.coDoctorsVi.split(',')[0] || 'Bác sĩ Chuyên khoa Phối hợp',
+      doctorNameEn: `${specialistRootDoc.nameEn} (${specialistRootDoc.specialtyEn})`,
     },
     {
       date: '18/09/2026',
       titleVi: s.thirdTitle,
-      titleEn: s.thirdTitle,
+      titleEn: thirdTitleEn,
       detailVi: s.thirdDiagVi,
-      detailEn: s.thirdDiagVi,
+      detailEn: thirdDiagEn,
       doctorName: 'Khoa Khám Đa Chuyên Khoa',
+      doctorNameEn: `${specialistSecDoc.nameEn} (${specialistSecDoc.specialtyEn})`,
     },
   ];
 
   return {
     id: s.id,
     name: s.name,
+    nameEn: toEnName(s.name),
     age: s.age,
     genderVi: s.genderVi,
     genderEn: s.genderVi === 'Nam' ? 'Male' : 'Female',
     primaryDoctorId: doc.id,
     primaryDoctorName: doc.name,
+    primaryDoctorNameEn: doc.nameEn,
     primarySpecialtyVi: doc.specialtyVi,
     primarySpecialtyEn: doc.specialtyEn,
     coDoctorsVi: s.coDoctorsVi,
-    coDoctorsEn: s.coDoctorsVi,
+    coDoctorsEn: toEnMedical(s.coDoctorsVi),
     statusVi: s.statusVi,
-    statusEn: s.statusVi,
+    statusEn: toEnMedical(s.statusVi),
     rootCauseChainVi: s.rootCauseChainVi,
-    rootCauseChainEn: s.rootCauseChainVi,
+    rootCauseChainEn: toEnMedical(s.rootCauseChainVi),
     medications: s.meds.map((m) => ({
       name: m.name,
       dosageVi: m.dosageVi,
-      dosageEn: m.dosageVi,
+      dosageEn: toEnMedical(m.dosageVi),
       deptVi: m.deptVi,
-      deptEn: m.deptVi,
+      deptEn: toEnMedical(m.deptVi),
     })),
     timeline,
     records,
