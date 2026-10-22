@@ -55,9 +55,12 @@ import {
 
 type RolePortal = 'LOGIN' | 'PATIENT' | 'DOCTOR' | 'ADMIN';
 type LangMode = 'vi' | 'en';
+type ConditionAlertLevel = 'NHE' | 'CAN_CHU_Y' | 'NANG' | 'NGUY_CAP';
 
 interface DoctorUnlockRequest {
+  requestKey: string;
   patientId: string;
+  doctorId: string;
   tideTag: string;
   categoryVi: string;
   categoryEn: string;
@@ -76,6 +79,76 @@ export default function App() {
   const [selectedDoctorFilter, setSelectedDoctorFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [showBellModal, setShowBellModal] = useState<boolean>(false);
+  const [showRevokeModal, setShowRevokeModal] = useState<boolean>(false);
+
+  // Per-patient set of doctors explicitly revoked/blocked from viewing records
+  const [revokedDoctorsByPatient, setRevokedDoctorsByPatient] = useState<
+    Record<string, Set<string>>
+  >(() => ({}));
+
+  // Per-patient 4-tier clinical condition alert level: Nhẹ | Cần chú ý | Nặng | Nguy cấp
+  const [conditionAlertByPatient, setConditionAlertByPatient] = useState<
+    Record<string, ConditionAlertLevel>
+  >(() => {
+    const map: Record<string, ConditionAlertLevel> = {};
+    const cycle: ConditionAlertLevel[] = ['NANG', 'CAN_CHU_Y', 'NGUY_CAP', 'CAN_CHU_Y', 'NHE'];
+    ALL_20_PATIENTS.forEach((p, idx) => {
+      map[p.id] = cycle[idx % cycle.length];
+    });
+    return map;
+  });
+
+  const getAlertMeta = (level: ConditionAlertLevel) => {
+    switch (level) {
+      case 'NHE':
+        return {
+          level,
+          labelVi: '🟢 Nhẹ',
+          labelEn: '🟢 Mild',
+          fullVi: 'Cảnh báo tình trạng: Nhẹ',
+          fullEn: 'Condition Alert: Mild',
+          badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+          bannerClass: 'bg-emerald-500 text-white border-emerald-200',
+        };
+      case 'CAN_CHU_Y':
+        return {
+          level,
+          labelVi: '🟡 Cần chú ý',
+          labelEn: '🟡 Needs Attention',
+          fullVi: 'Cảnh báo tình trạng: Cần chú ý',
+          fullEn: 'Condition Alert: Needs Attention',
+          badgeClass: 'bg-amber-100 text-amber-900 border-amber-300',
+          bannerClass: 'bg-amber-500 text-white border-amber-200',
+        };
+      case 'NANG':
+        return {
+          level,
+          labelVi: '🟠 Nặng',
+          labelEn: '🟠 Severe',
+          fullVi: 'Cảnh báo tình trạng: Nặng',
+          fullEn: 'Condition Alert: Severe',
+          badgeClass: 'bg-orange-100 text-orange-900 border-orange-300',
+          bannerClass: 'bg-orange-500 text-white border-orange-200',
+        };
+      case 'NGUY_CAP':
+        return {
+          level,
+          labelVi: '🔴 Nguy cấp',
+          labelEn: '🔴 Critical',
+          fullVi: 'Cảnh báo tình trạng: Nguy cấp',
+          fullEn: 'Condition Alert: Critical',
+          badgeClass: 'bg-red-100 text-red-800 border-red-300 animate-pulse',
+          bannerClass: 'bg-red-600 text-white border-red-200 animate-pulse',
+        };
+    }
+  };
+
+  const getRowAlertLevel = (row: EncryptedDatabaseRow): ConditionAlertLevel => {
+    if (row.tideTag.endsWith(':related')) return 'NANG';
+    if (row.tideTag.endsWith(':primary')) return 'CAN_CHU_Y';
+    if (row.tideTag.endsWith(':secondary')) return 'NHE';
+    return 'NGUY_CAP';
+  };
 
   // Bilingual helper getters (accent-free names & full English text when lang === 'en')
   const t = (vi: string, en: string) => (lang === 'vi' ? vi : en);
@@ -100,16 +173,25 @@ export default function App() {
   // Encrypted rows for the currently selected patient
   const [encryptedRows, setEncryptedRows] = useState<EncryptedDatabaseRow[]>([]);
 
-  // Per-patient set of authorized tags for the Primary Monitoring Doctor
-  const [authorizedByPatient, setAuthorizedByPatient] = useState<Record<string, Set<string>>>(
-    () => {
-      const initial: Record<string, Set<string>> = {};
-      for (const p of ALL_20_PATIENTS) {
-        initial[p.id] = new Set([`patient:${p.id.toLowerCase()}:primary`]);
+  // Per-patient, per-doctor set of authorized tags:
+  // - ONLY the Primary Monitoring Doctor (p.primaryDoctorId) starts with :primary and can view MULTIPLE records.
+  // - Every Secondary Doctor (Bác sĩ phụ) starts with 0 records and can ONLY ever view/request 1 single specialty record!
+  const [authorizedByPatientAndDoctor, setAuthorizedByPatientAndDoctor] = useState<
+    Record<string, Record<string, Set<string>>>
+  >(() => {
+    const initial: Record<string, Record<string, Set<string>>> = {};
+    for (const p of ALL_20_PATIENTS) {
+      initial[p.id] = {};
+      for (const d of HOSPITAL_DOCTORS) {
+        if (d.id === p.primaryDoctorId) {
+          initial[p.id][d.id] = new Set([`patient:${p.id.toLowerCase()}:primary`]);
+        } else {
+          initial[p.id][d.id] = new Set();
+        }
       }
-      return initial;
     }
-  );
+    return initial;
+  });
 
   // Per-patient 3-step Doctor Care Pathway & Completion %
   const [careStagesByPatient, setCareStagesByPatient] = useState<
@@ -122,24 +204,16 @@ export default function App() {
     return initial;
   });
 
-  // Per-patient pending unlock requests from doctors to patients
+  // Per-patient pending unlock requests from doctors to patients (keyed by `${doctorId}__${tideTag}`)
   const [requestsByPatient, setRequestsByPatient] = useState<
     Record<string, Record<string, DoctorUnlockRequest>>
-  >(() => {
-    try {
-      const saved = localStorage.getItem('carepass_requests_v1');
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // ignore storage errors
-    }
-    return {};
-  });
+  >(() => ({}));
   const [requestSentBanner, setRequestSentBanner] = useState<string | null>(null);
 
   // Real-time Cross-Tab Synchronization (so Doctor Tab <-> Patient Tab sync instantly!)
   useEffect(() => {
     try {
-      localStorage.setItem('carepass_requests_v1', JSON.stringify(requestsByPatient));
+      localStorage.setItem('carepass_requests_v2', JSON.stringify(requestsByPatient));
     } catch {
       // ignore
     }
@@ -147,29 +221,35 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const serialized: Record<string, string[]> = {};
-      Object.entries(authorizedByPatient).forEach(([pid, set]) => {
-        serialized[pid] = Array.from(set);
+      const serialized: Record<string, Record<string, string[]>> = {};
+      Object.entries(authorizedByPatientAndDoctor).forEach(([pid, docMap]) => {
+        serialized[pid] = {};
+        Object.entries(docMap).forEach(([did, set]) => {
+          serialized[pid][did] = Array.from(set);
+        });
       });
-      localStorage.setItem('carepass_authorized_v1', JSON.stringify(serialized));
+      localStorage.setItem('carepass_authorized_v2', JSON.stringify(serialized));
     } catch {
       // ignore
     }
-  }, [authorizedByPatient]);
+  }, [authorizedByPatientAndDoctor]);
 
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       try {
-        if (e.key === 'carepass_requests_v1' && e.newValue) {
+        if (e.key === 'carepass_requests_v2' && e.newValue) {
           setRequestsByPatient(JSON.parse(e.newValue));
         }
-        if (e.key === 'carepass_authorized_v1' && e.newValue) {
-          const parsed = JSON.parse(e.newValue) as Record<string, string[]>;
-          const next: Record<string, Set<string>> = {};
-          Object.entries(parsed).forEach(([pid, arr]) => {
-            next[pid] = new Set(arr);
+        if (e.key === 'carepass_authorized_v2' && e.newValue) {
+          const parsed = JSON.parse(e.newValue) as Record<string, Record<string, string[]>>;
+          const next: Record<string, Record<string, Set<string>>> = {};
+          Object.entries(parsed).forEach(([pid, docMap]) => {
+            next[pid] = {};
+            Object.entries(docMap).forEach(([did, arr]) => {
+              next[pid][did] = new Set(arr);
+            });
           });
-          setAuthorizedByPatient(next);
+          setAuthorizedByPatientAndDoctor(next);
         }
       } catch {
         // ignore
@@ -219,34 +299,123 @@ export default function App() {
 
   const isPrimaryMonitoringDoctor = activeDoctor.id === currentPatient.primaryDoctorId;
 
-  const specialistStagesForActiveDoctor = useMemo(
-    () =>
-      currentCareStages.filter(
-        (st) =>
-          st.roleType !== 'PRIMARY_MONITOR' &&
-          st.doctorId === activeDoctor.id &&
-          st.isReferred
-      ),
-    [currentCareStages, activeDoctor.id]
+  // Determine ALL record tags (1 or multiple diseases) that are related to a Secondary Specialist Doctor's specialty
+  const getSpecialtyRelatedTagsForSecondaryDoctor = useCallback(
+    (patient: PatientProfile, doc: HospitalDoctor, stages: DoctorCareStage[]): Set<string> => {
+      const allowed = new Set<string>();
+      const tagPrefix = `patient:${patient.id.toLowerCase()}`;
+
+      // 1. Any stage explicitly assigned to this specialist doctor
+      stages.forEach((st) => {
+        if (st.doctorId === doc.id) {
+          allowed.add(st.targetTideTag);
+        }
+      });
+
+      // 2. Specialty keyword matching across all non-private records of the patient
+      const specialtyKeywordsByDoc: Record<string, string[]> = {
+        'DOC-01': ['tim', 'huyết áp', 'mạch', 'nhịp', 'lipid', 'mỡ máu', 'xơ vữa', 'cardio'],
+        'DOC-02': ['tâm thần', 'giấc ngủ', 'trầm cảm', 'lo âu', 'stress', 'ăn đêm', 'mất ngủ', 'sertraline', 'psych'],
+        'DOC-03': ['nội tiết', 'chuyển hóa', 'đái tháo đường', 'insulin', 'tuyến giáp', 'béo phì', 'bmi', 'tăng cân', 'mỡ máu', 'gout', 'acid uric'],
+        'DOC-04': ['xương khớp', 'cột sống', 'đĩa đệm', 'khớp', 'gout', 'thoái hóa', 'thắt lưng', 'cổ vai', 'vật lý trị liệu', 'tăng 14kg', 'tăng cân'],
+        'DOC-05': ['tiêu hóa', 'gan', 'mật', 'dạ dày', 'trào ngược', 'gerd', 'đại tràng', 'hang vị', 'loét', 'men gan', 'ăn đêm'],
+        'DOC-06': ['hô hấp', 'phổi', 'hen', 'phế quản', 'thần kinh', 'đau đầu', 'chóng mặt', 'rễ thần kinh', 'ngưng thở', 'giấc ngủ'],
+      };
+      const keywords = specialtyKeywordsByDoc[doc.id] || [];
+
+      patient.records.forEach((rec) => {
+        if (rec.tideTag.endsWith(':private')) return;
+        const haystack = `${rec.vietnameseCategory} ${rec.title} ${rec.vietnameseDiagnosis} ${rec.vietnamesePlan}`.toLowerCase();
+        if (keywords.some((kw) => haystack.includes(kw))) {
+          allowed.add(rec.tideTag);
+        }
+      });
+
+      // 3. Ensure every specialist doctor has multiple (at least 2) clinically linked specialty records on the patient
+      // so they can view all diseases related to their specialty (e.g., their direct specialty disease + its clinically linked cause/effect disease)
+      if (allowed.has(`${tagPrefix}:related`) && allowed.size < 2) {
+        allowed.add(`${tagPrefix}:primary`);
+      } else if (allowed.has(`${tagPrefix}:secondary`) && allowed.size < 2) {
+        allowed.add(`${tagPrefix}:related`);
+      } else if (allowed.size === 0) {
+        const docNum = parseInt(doc.id.replace(/\D/g, ''), 10) || 1;
+        allowed.add(`${tagPrefix}:${docNum % 2 === 0 ? 'related' : 'secondary'}`);
+        allowed.add(`${tagPrefix}:primary`);
+      } else if (allowed.size === 1) {
+        if (!allowed.has(`${tagPrefix}:related`)) {
+          allowed.add(`${tagPrefix}:related`);
+        } else {
+          allowed.add(`${tagPrefix}:primary`);
+        }
+      }
+
+      return allowed;
+    },
+    []
   );
 
+  const allowedSpecialtyTagsForActiveSecondaryDoctor = useMemo(
+    () =>
+      getSpecialtyRelatedTagsForSecondaryDoctor(
+        currentPatient,
+        activeDoctor,
+        currentCareStages
+      ),
+    [getSpecialtyRelatedTagsForSecondaryDoctor, currentPatient, activeDoctor, currentCareStages]
+  );
+
+  const revokedDoctorsForCurrentPatient = useMemo(
+    () => revokedDoctorsByPatient[currentPatient.id] || new Set<string>(),
+    [revokedDoctorsByPatient, currentPatient.id]
+  );
+
+  const isCurrentDoctorRevoked = useMemo(
+    () => revokedDoctorsForCurrentPatient.has(activeDoctor.id),
+    [revokedDoctorsForCurrentPatient, activeDoctor.id]
+  );
+
+  const currentPatientAlert = useMemo(
+    () => conditionAlertByPatient[currentPatient.id] || 'CAN_CHU_Y',
+    [conditionAlertByPatient, currentPatient.id]
+  );
+
+  // Strict per-doctor & per-role decryption scope:
+  // - Primary Monitoring Doctor: can view multiple records unlocked specifically for them.
+  // - Secondary Specialist Doctor: can view MULTIPLE records as long as those records are related to their specialty AND unlocked specifically for that doctor!
   const effectiveDoctorTags = useMemo(() => {
-    const patientUnlocked = authorizedByPatient[currentPatient.id] || new Set<string>();
-    // When patient grants access, any treating/consulting doctor can decrypt the authorized records!
-    const combinedTags = new Set<string>(patientUnlocked);
-    for (const st of specialistStagesForActiveDoctor) {
-      combinedTags.add(st.targetTideTag);
+    if (revokedDoctorsForCurrentPatient.has(activeDoctor.id)) {
+      return new Set<string>();
     }
-    return combinedTags;
+    const grantedToThisDoctor =
+      authorizedByPatientAndDoctor[currentPatient.id]?.[activeDoctor.id] || new Set<string>();
+
+    if (isPrimaryMonitoringDoctor) {
+      return grantedToThisDoctor;
+    }
+
+    // Secondary specialist doctor: can view all granted records that relate to their specialty!
+    const filtered = new Set<string>();
+    grantedToThisDoctor.forEach((tag) => {
+      if (allowedSpecialtyTagsForActiveSecondaryDoctor.has(tag)) {
+        filtered.add(tag);
+      }
+    });
+    return filtered;
   }, [
-    authorizedByPatient,
+    revokedDoctorsForCurrentPatient,
+    activeDoctor.id,
+    authorizedByPatientAndDoctor,
     currentPatient.id,
-    specialistStagesForActiveDoctor,
+    isPrimaryMonitoringDoctor,
+    allowedSpecialtyTagsForActiveSecondaryDoctor,
   ]);
 
+  // Primary Monitoring Doctor's unlocked tags (for Patient Portal toggle view)
   const authorizedTags = useMemo(
-    () => authorizedByPatient[currentPatient.id] || new Set<string>(),
-    [authorizedByPatient, currentPatient.id]
+    () =>
+      authorizedByPatientAndDoctor[currentPatient.id]?.[currentPatient.primaryDoctorId] ||
+      new Set<string>(),
+    [authorizedByPatientAndDoctor, currentPatient.id, currentPatient.primaryDoctorId]
   );
 
   const pendingRequests = useMemo(
@@ -348,15 +517,38 @@ export default function App() {
   }, [effectiveDoctorTags, encryptedRows, activeDoctor.sweKey]);
 
   const handleDoctorSendUnlockRequest = async (row: EncryptedDatabaseRow) => {
-    const reasonVi = `BS. ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu bệnh nhân ${currentPatient.name} mở khóa hồ sơ [${row.vietnameseCategory}] để hội chẩn và điều trị tận gốc.`;
-    const reasonEn = `Dr. ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requests patient ${currentPatient.nameEn} to unlock [${row.category}] for diagnosis and root-cause care.`;
+    // Enforce rule: Secondary Specialist Doctor can request ANY record (1 or multiple) related to their specialty,
+    // but CANNOT request records unrelated to their specialty!
+    if (
+      !isPrimaryMonitoringDoctor &&
+      !allowedSpecialtyTagsForActiveSecondaryDoctor.has(row.tideTag)
+    ) {
+      setClinicianErrors((prev) => ({
+        ...prev,
+        [row.tideTag]: t(
+          `NGOÀI CHUYÊN KHOA: ${activeDoctor.name} (${activeDoctor.specialtyVi}) chỉ được yêu cầu xem các bệnh liên quan đến chuyên khoa của mình, không được yêu cầu [${row.vietnameseCategory}]!`,
+          `OUTSIDE SPECIALTY SCOPE: ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) can only request records related to their specialty, NOT [${row.category}]!`
+        ),
+      }));
+      return;
+    }
+
+    const reqKey = `${activeDoctor.id}__${row.tideTag}`;
+    const reasonVi = isPrimaryMonitoringDoctor
+      ? `BS theo dõi chính ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu BN ${currentPatient.name} mở khóa [${row.vietnameseCategory}] (Chỉ cấp quyền cho riêng ${activeDoctor.name}).`
+      : `BS chuyên khoa ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu BN ${currentPatient.name} mở khóa bệnh liên quan đến chuyên khoa [${row.vietnameseCategory}] (Chỉ cấp quyền cho riêng ${activeDoctor.name}).`;
+    const reasonEn = isPrimaryMonitoringDoctor
+      ? `Primary monitoring doctor ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requests ${currentPatient.nameEn} to unlock [${row.category}] (Granted exclusively to ${activeDoctor.nameEn}).`
+      : `Specialist doctor ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requests ${currentPatient.nameEn} to unlock specialty-related record [${row.category}] (Granted exclusively to ${activeDoctor.nameEn}).`;
 
     setRequestsByPatient((prev) => ({
       ...prev,
       [currentPatient.id]: {
         ...(prev[currentPatient.id] || {}),
-        [row.tideTag]: {
+        [reqKey]: {
+          requestKey: reqKey,
           patientId: currentPatient.id,
+          doctorId: activeDoctor.id,
           tideTag: row.tideTag,
           categoryVi: row.vietnameseCategory,
           categoryEn: row.category,
@@ -371,8 +563,8 @@ export default function App() {
 
     setRequestSentBanner(
       lang === 'vi'
-        ? `✅ Đã gửi chuông đỏ yêu cầu mở khóa [${row.vietnameseCategory}] tới BN ${currentPatient.name} (${currentPatient.id})!`
-        : `✅ Sent red bell unlock request for [${row.category}] to Patient ${currentPatient.nameEn} (${currentPatient.id})!`
+        ? `✅ Đã gửi chuông đỏ yêu cầu mở khóa [${row.vietnameseCategory}] cho riêng ${activeDoctor.name} tới BN ${currentPatient.name}!`
+        : `✅ Sent red bell unlock request for [${row.category}] exclusively for ${activeDoctor.nameEn} to ${currentPatient.nameEn}!`
     );
 
     await appendAuditLog(
@@ -380,8 +572,8 @@ export default function App() {
       'HOLISTIC_REQUEST',
       'SUCCESS',
       lang === 'vi'
-        ? `${activeDoctor.name} gửi yêu cầu theo dõi [${row.vietnameseCategory}] tới BN ${currentPatient.name}.`
-        : `${activeDoctor.nameEn} sent status monitoring request for [${row.category}] to ${currentPatient.nameEn}.`,
+        ? `${activeDoctor.name} gửi yêu cầu xem riêng [${row.vietnameseCategory}] tới BN ${currentPatient.name}.`
+        : `${activeDoctor.nameEn} sent an exclusive access request for [${row.category}] to ${currentPatient.nameEn}.`,
       row.tideTag
     );
   };
@@ -389,45 +581,122 @@ export default function App() {
   const handleDoctorRequestAllRelated = async () => {
     const sourceRows = encryptedRows.length > 0 ? encryptedRows : currentPatient.records;
     const currentReqs = { ...(requestsByPatient[currentPatient.id] || {}) };
-    let addedCount = 0;
+    const doctorCurrentSet =
+      authorizedByPatientAndDoctor[currentPatient.id]?.[activeDoctor.id] || new Set<string>();
 
+    // CASE 1: Secondary Specialist Doctor -> Can request ALL diseases (1 or multiple) related to their specialty!
+    if (!isPrimaryMonitoringDoctor) {
+      const targetRows = sourceRows.filter((r) =>
+        allowedSpecialtyTagsForActiveSecondaryDoctor.has(r.tideTag)
+      );
+      if (targetRows.length === 0) return;
+
+      let addedSpecCount = 0;
+      for (const row of targetRows) {
+        if (!doctorCurrentSet.has(row.tideTag)) {
+          const reqKey = `${activeDoctor.id}__${row.tideTag}`;
+          currentReqs[reqKey] = {
+            requestKey: reqKey,
+            patientId: currentPatient.id,
+            doctorId: activeDoctor.id,
+            tideTag: row.tideTag,
+            categoryVi: row.vietnameseCategory,
+            categoryEn: row.category,
+            doctorNameVi: activeDoctor.name,
+            doctorNameEn: activeDoctor.nameEn,
+            reasonVi: `BS chuyên khoa ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu mở khóa bệnh liên quan đến chuyên khoa [${row.vietnameseCategory}] (Chỉ riêng ${activeDoctor.name} được xem).`,
+            reasonEn: `Specialist doctor ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requests access to specialty-related record [${row.category}] (Exclusively for ${activeDoctor.nameEn}).`,
+            requestedAt: new Date().toLocaleTimeString(),
+          };
+          addedSpecCount++;
+        }
+      }
+
+      // If all specialty-related records were already unlocked for this specialist doctor, reset and re-request them cleanly for demo
+      if (addedSpecCount === 0) {
+        setAuthorizedByPatientAndDoctor((prev) => ({
+          ...prev,
+          [currentPatient.id]: {
+            ...(prev[currentPatient.id] || {}),
+            [activeDoctor.id]: new Set(),
+          },
+        }));
+        for (const row of targetRows) {
+          const reqKey = `${activeDoctor.id}__${row.tideTag}`;
+          currentReqs[reqKey] = {
+            requestKey: reqKey,
+            patientId: currentPatient.id,
+            doctorId: activeDoctor.id,
+            tideTag: row.tideTag,
+            categoryVi: row.vietnameseCategory,
+            categoryEn: row.category,
+            doctorNameVi: activeDoctor.name,
+            doctorNameEn: activeDoctor.nameEn,
+            reasonVi: `BS chuyên khoa ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu mở khóa bệnh liên quan đến chuyên khoa [${row.vietnameseCategory}] (Chỉ riêng ${activeDoctor.name} được xem).`,
+            reasonEn: `Specialist doctor ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requests access to specialty-related record [${row.category}] (Exclusively for ${activeDoctor.nameEn}).`,
+            requestedAt: new Date().toLocaleTimeString(),
+          };
+        }
+      }
+
+      setRequestsByPatient((prev) => ({
+        ...prev,
+        [currentPatient.id]: currentReqs,
+      }));
+
+      setRequestSentBanner(
+        lang === 'vi'
+          ? `✅ Bác sĩ chuyên khoa ${activeDoctor.name} đã gửi yêu cầu mở khóa ${targetRows.length} bệnh liên quan đến [${activeDoctor.specialtyVi}] tới BN ${currentPatient.name} (Chỉ mở riêng cho ${activeDoctor.name})!`
+          : `✅ Specialist ${activeDoctor.nameEn} sent unlock requests for ${targetRows.length} records related to [${activeDoctor.specialtyEn}] to ${currentPatient.nameEn} (Exclusively for ${activeDoctor.nameEn})!`
+      );
+      return;
+    }
+
+    // CASE 2: Primary Monitoring Doctor (Bác sĩ theo dõi chính) -> Allowed to request multiple related records!
+    let addedCount = 0;
     for (const row of sourceRows) {
-      if (!authorizedTags.has(row.tideTag) && !row.tideTag.endsWith(':private')) {
-        currentReqs[row.tideTag] = {
+      if (!doctorCurrentSet.has(row.tideTag) && !row.tideTag.endsWith(':private')) {
+        const reqKey = `${activeDoctor.id}__${row.tideTag}`;
+        currentReqs[reqKey] = {
+          requestKey: reqKey,
           patientId: currentPatient.id,
+          doctorId: activeDoctor.id,
           tideTag: row.tideTag,
           categoryVi: row.vietnameseCategory,
           categoryEn: row.category,
           doctorNameVi: activeDoctor.name,
           doctorNameEn: activeDoctor.nameEn,
-          reasonVi: `BS. ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu mở khóa hồ sơ [${row.vietnameseCategory}] để điều trị tận gốc cho BN ${currentPatient.name}.`,
-          reasonEn: `Dr. ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requested access to [${row.category}] to treat root-cause correlations for patient ${currentPatient.nameEn}.`,
+          reasonVi: `BS theo dõi chính ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu mở khóa hồ sơ [${row.vietnameseCategory}] để điều trị tận gốc (Chỉ riêng ${activeDoctor.name} được xem).`,
+          reasonEn: `Primary monitoring doctor ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requested access to [${row.category}] for root-cause care (Exclusively for ${activeDoctor.nameEn}).`,
           requestedAt: new Date().toLocaleTimeString(),
         };
         addedCount++;
       }
     }
 
-    // Fallback: if all related records were ALREADY unlocked earlier, re-lock related & secondary
-    // and send fresh unlock requests so the button ALWAYS works when clicked!
     if (addedCount === 0) {
-      const resetAuthorized = new Set<string>([`patient:${currentPatient.id.toLowerCase()}:primary`]);
-      setAuthorizedByPatient((prev) => ({
+      setAuthorizedByPatientAndDoctor((prev) => ({
         ...prev,
-        [currentPatient.id]: resetAuthorized,
+        [currentPatient.id]: {
+          ...(prev[currentPatient.id] || {}),
+          [activeDoctor.id]: new Set([`patient:${currentPatient.id.toLowerCase()}:primary`]),
+        },
       }));
 
       for (const row of sourceRows) {
         if (!row.tideTag.endsWith(':primary') && !row.tideTag.endsWith(':private')) {
-          currentReqs[row.tideTag] = {
+          const reqKey = `${activeDoctor.id}__${row.tideTag}`;
+          currentReqs[reqKey] = {
+            requestKey: reqKey,
             patientId: currentPatient.id,
+            doctorId: activeDoctor.id,
             tideTag: row.tideTag,
             categoryVi: row.vietnameseCategory,
             categoryEn: row.category,
             doctorNameVi: activeDoctor.name,
             doctorNameEn: activeDoctor.nameEn,
-            reasonVi: `BS. ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu mở khóa lại hồ sơ [${row.vietnameseCategory}] để điều trị tận gốc cho BN ${currentPatient.name}.`,
-            reasonEn: `Dr. ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requested access to [${row.category}] to treat root-cause correlations for patient ${currentPatient.nameEn}.`,
+            reasonVi: `BS theo dõi chính ${activeDoctor.name} (${activeDoctor.specialtyVi}) yêu cầu mở khóa lại hồ sơ [${row.vietnameseCategory}] (Chỉ riêng ${activeDoctor.name} được xem).`,
+            reasonEn: `Primary monitoring doctor ${activeDoctor.nameEn} (${activeDoctor.specialtyEn}) requested access to [${row.category}] (Exclusively for ${activeDoctor.nameEn}).`,
             requestedAt: new Date().toLocaleTimeString(),
           };
           addedCount++;
@@ -443,8 +712,8 @@ export default function App() {
     const totalReqs = Object.keys(currentReqs).length;
     setRequestSentBanner(
       lang === 'vi'
-        ? `✅ Đã gửi thành công ${totalReqs} yêu cầu mở khóa bệnh liên quan tới Bệnh nhân ${currentPatient.name} (${currentPatient.id})! Chuông đỏ thông báo đã bật sáng.`
-        : `✅ Successfully sent ${totalReqs} related record unlock requests to Patient ${currentPatient.nameEn} (${currentPatient.id})! Red bell alert is now active.`
+        ? `✅ Đã gửi thành công ${totalReqs} yêu cầu mở khóa bệnh liên quan (dành riêng cho ${activeDoctor.name}) tới BN ${currentPatient.name}!`
+        : `✅ Sent ${totalReqs} related record unlock requests (exclusively for ${activeDoctor.nameEn}) to Patient ${currentPatient.nameEn}!`
     );
 
     await appendAuditLog(
@@ -452,8 +721,8 @@ export default function App() {
       'HOLISTIC_REQUEST',
       'SUCCESS',
       lang === 'vi'
-        ? `${activeDoctor.name} gửi yêu cầu theo dõi toàn bộ bệnh liên quan của BN ${currentPatient.name}.`
-        : `${activeDoctor.nameEn} requested access to all related conditions of ${currentPatient.nameEn}.`,
+        ? `${activeDoctor.name} gửi yêu cầu theo dõi các bệnh liên quan của BN ${currentPatient.name}.`
+        : `${activeDoctor.nameEn} requested access to related conditions of ${currentPatient.nameEn}.`,
       `patient:${currentPatient.id.toLowerCase()}:*`
     );
   };
@@ -473,12 +742,34 @@ export default function App() {
       return { ...prev, [currentPatient.id]: updated };
     });
 
+    // Also create a pending unlock request specifically for that specialist doctor on their 1 specialty disease!
+    const reqKey = `${stage.doctorId}__${stage.targetTideTag}`;
+    setRequestsByPatient((prev) => ({
+      ...prev,
+      [currentPatient.id]: {
+        ...(prev[currentPatient.id] || {}),
+        [reqKey]: {
+          requestKey: reqKey,
+          patientId: currentPatient.id,
+          doctorId: stage.doctorId,
+          tideTag: stage.targetTideTag,
+          categoryVi: stage.diseaseCategoryVi,
+          categoryEn: stage.diseaseCategoryEn,
+          doctorNameVi: stage.doctorName,
+          doctorNameEn: stage.doctorNameEn,
+          reasonVi: `BS phụ chuyên khoa ${stage.doctorName} (${stage.specialtyVi}) yêu cầu BN ${currentPatient.name} mở khóa duy nhất 1 bệnh chuyên ngành [${stage.diseaseCategoryVi}] (Chỉ riêng ${stage.doctorName} được xem).`,
+          reasonEn: `Secondary specialist ${stage.doctorNameEn} (${stage.specialtyEn}) requests ${currentPatient.nameEn} to unlock ONLY their 1 specialty record [${stage.diseaseCategoryEn}] (Exclusively for ${stage.doctorNameEn}).`,
+          requestedAt: new Date().toLocaleTimeString(),
+        },
+      },
+    }));
+
     const newStep: PatientTimelineStep = {
       date: '22/10/2026',
       titleVi: `Gửi yêu cầu Chuyên khoa: ${stage.doctorName} (${stage.specialtyVi})`,
       titleEn: `Specialist Referral: ${stage.doctorNameEn} (${stage.specialtyEn})`,
-      detailVi: `${currentPatient.primaryDoctorName} đã gửi yêu cầu cho ${stage.doctorName} điều trị riêng bệnh [${stage.diseaseCategoryVi}]. TideCloak chỉ cấp quyền xem đúng 1 bệnh này.`,
-      detailEn: `${currentPatient.primaryDoctorNameEn} referred [${stage.diseaseCategoryEn}] to ${stage.doctorNameEn}. TideCloak grants scoped access to ONLY this 1 condition.`,
+      detailVi: `${currentPatient.primaryDoctorName} chuyển bệnh [${stage.diseaseCategoryVi}] cho ${stage.doctorName}. ${stage.doctorName} chỉ được yêu cầu & xem duy nhất 1 bệnh chuyên ngành này.`,
+      detailEn: `${currentPatient.primaryDoctorNameEn} referred [${stage.diseaseCategoryEn}] to ${stage.doctorNameEn}. ${stage.doctorNameEn} can ONLY request & view this 1 specialty condition.`,
       doctorName: `${currentPatient.primaryDoctorName} ➔ ${stage.doctorName}`,
       doctorNameEn: `${currentPatient.primaryDoctorNameEn} ➔ ${stage.doctorNameEn}`,
     };
@@ -492,8 +783,8 @@ export default function App() {
       'POLICY_GRANT',
       'SUCCESS',
       lang === 'vi'
-        ? `${currentPatient.primaryDoctorName} gửi yêu cầu cho ${stage.doctorName} sửa bệnh [${stage.diseaseCategoryVi}] (Chỉ xem đúng 1 bệnh).`
-        : `${currentPatient.primaryDoctorNameEn} referred [${stage.diseaseCategoryEn}] to ${stage.doctorNameEn} (Scoped 1-disease access).`,
+        ? `${currentPatient.primaryDoctorName} gửi yêu cầu cho ${stage.doctorName} sửa bệnh [${stage.diseaseCategoryVi}] (Cần BN duyệt cho riêng ${stage.doctorName}).`
+        : `${currentPatient.primaryDoctorNameEn} referred [${stage.diseaseCategoryEn}] to ${stage.doctorNameEn} (Requires patient approval for ${stage.doctorNameEn}).`,
       stage.targetTideTag
     );
   };
@@ -540,18 +831,26 @@ export default function App() {
     );
   };
 
-  const handlePatientApproveRequest = async (tideTag: string) => {
-    const nextAuthorized = new Set(authorizedTags);
-    nextAuthorized.add(tideTag);
-    setAuthorizedByPatient((prev) => ({
-      ...prev,
-      [currentPatient.id]: nextAuthorized,
-    }));
+  const handlePatientApproveRequest = async (reqKey: string) => {
+    const reqObj = pendingRequests[reqKey];
+    if (!reqObj) return;
 
-    const reqObj = pendingRequests[tideTag];
+    // Grant access EXCLUSIVELY to reqObj.doctorId (no other doctor gets access!)
+    // Both Primary Doctors and Specialist Doctors can hold multiple approved tags that relate to their specialty!
+    setAuthorizedByPatientAndDoctor((prev) => {
+      const patientMap = { ...(prev[currentPatient.id] || {}) };
+      const docSet = new Set(patientMap[reqObj.doctorId] || []);
+      docSet.add(reqObj.tideTag);
+      patientMap[reqObj.doctorId] = docSet;
+      return {
+        ...prev,
+        [currentPatient.id]: patientMap,
+      };
+    });
+
     setRequestsByPatient((prev) => {
       const copyForPatient = { ...(prev[currentPatient.id] || {}) };
-      delete copyForPatient[tideTag];
+      delete copyForPatient[reqKey];
       if (Object.keys(copyForPatient).length === 0) {
         setShowBellModal(false);
         setRequestSentBanner(null);
@@ -564,19 +863,26 @@ export default function App() {
       'POLICY_GRANT',
       'SUCCESS',
       lang === 'vi'
-        ? `BN ${currentPatient.name} ĐỒNG Ý mở khóa [${reqObj?.categoryVi || tideTag}] cho ${currentPatient.primaryDoctorName}.`
-        : `Patient ${currentPatient.nameEn} APPROVED access to [${reqObj?.categoryEn || tideTag}] for ${currentPatient.primaryDoctorNameEn}.`,
-      tideTag
+        ? `BN ${currentPatient.name} ĐỒNG Ý mở khóa [${reqObj.categoryVi}] CHỈ DÀNH RIÊNG cho ${reqObj.doctorNameVi} (Các bác sĩ khác vẫn bị khóa).`
+        : `Patient ${currentPatient.nameEn} APPROVED [${reqObj.categoryEn}] EXCLUSIVELY for ${reqObj.doctorNameEn} (All other doctors remain locked).`,
+      reqObj.tideTag
     );
   };
 
   const handlePatientApproveAllRequests = async () => {
-    const nextAuthorized = new Set(authorizedTags);
-    Object.keys(pendingRequests).forEach((tag) => nextAuthorized.add(tag));
-    setAuthorizedByPatient((prev) => ({
-      ...prev,
-      [currentPatient.id]: nextAuthorized,
-    }));
+    setAuthorizedByPatientAndDoctor((prev) => {
+      const patientMap = { ...(prev[currentPatient.id] || {}) };
+      Object.values(pendingRequests).forEach((req) => {
+        const docSet = new Set(patientMap[req.doctorId] || []);
+        docSet.add(req.tideTag);
+        patientMap[req.doctorId] = docSet;
+      });
+      return {
+        ...prev,
+        [currentPatient.id]: patientMap,
+      };
+    });
+
     setRequestsByPatient((prev) => ({
       ...prev,
       [currentPatient.id]: {},
@@ -589,17 +895,17 @@ export default function App() {
       'POLICY_GRANT',
       'SUCCESS',
       lang === 'vi'
-        ? `BN ${currentPatient.name} ĐỒNG Ý TẤT CẢ yêu cầu theo dõi của ${currentPatient.primaryDoctorName}.`
-        : `Patient ${currentPatient.nameEn} APPROVED ALL monitoring requests from ${currentPatient.primaryDoctorNameEn}.`,
+        ? `BN ${currentPatient.name} ĐỒNG Ý các yêu cầu mở khóa theo đúng từng Bác sĩ đã gửi yêu cầu.`
+        : `Patient ${currentPatient.nameEn} APPROVED pending requests exclusively for each requesting doctor.`,
       `patient:${currentPatient.id.toLowerCase()}:*`
     );
   };
 
-  const handlePatientRejectRequest = async (tideTag: string) => {
-    const reqObj = pendingRequests[tideTag];
+  const handlePatientRejectRequest = async (reqKey: string) => {
+    const reqObj = pendingRequests[reqKey];
     setRequestsByPatient((prev) => {
       const copyForPatient = { ...(prev[currentPatient.id] || {}) };
-      delete copyForPatient[tideTag];
+      delete copyForPatient[reqKey];
       if (Object.keys(copyForPatient).length === 0) {
         setShowBellModal(false);
         setRequestSentBanner(null);
@@ -612,41 +918,48 @@ export default function App() {
       'POLICY_REVOKE',
       'DENIED',
       lang === 'vi'
-        ? `BN ${currentPatient.name} đã TỪ CHỐI yêu cầu theo dõi [${reqObj?.categoryVi || tideTag}].`
-        : `Patient ${currentPatient.nameEn} REJECTED monitoring request for [${reqObj?.categoryEn || tideTag}].`,
-      tideTag
+        ? `BN ${currentPatient.name} đã TỪ CHỐI yêu cầu xem [${reqObj?.categoryVi || reqKey}] của ${reqObj?.doctorNameVi || ''}.`
+        : `Patient ${currentPatient.nameEn} REJECTED request for [${reqObj?.categoryEn || reqKey}] from ${reqObj?.doctorNameEn || ''}.`,
+      reqObj?.tideTag
     );
   };
 
   const handleToggleTagAccess = async (row: EncryptedDatabaseRow) => {
     const tag = row.tideTag;
+    const primaryDocId = currentPatient.primaryDoctorId;
     const isGranted = authorizedTags.has(tag);
     const nextSet = new Set(authorizedTags);
 
     if (isGranted) {
       nextSet.delete(tag);
-      setAuthorizedByPatient((prev) => ({
+      setAuthorizedByPatientAndDoctor((prev) => ({
         ...prev,
-        [currentPatient.id]: nextSet,
+        [currentPatient.id]: {
+          ...(prev[currentPatient.id] || {}),
+          [primaryDocId]: nextSet,
+        },
       }));
       await appendAuditLog(
         'PATIENT_SWE',
         'POLICY_REVOKE',
         'CRITICAL_BLOCK',
         lang === 'vi'
-          ? `BN ${currentPatient.name} đã KHÓA quyền xem [${row.vietnameseCategory}] đối với ${currentPatient.primaryDoctorName}.`
-          : `Patient ${currentPatient.nameEn} LOCKED [${row.category}] access for ${currentPatient.primaryDoctorNameEn}.`,
+          ? `BN ${currentPatient.name} đã KHÓA quyền xem [${row.vietnameseCategory}] đối với BS theo dõi chính ${currentPatient.primaryDoctorName}.`
+          : `Patient ${currentPatient.nameEn} LOCKED [${row.category}] access for primary doctor ${currentPatient.primaryDoctorNameEn}.`,
         tag
       );
     } else {
       nextSet.add(tag);
-      setAuthorizedByPatient((prev) => ({
+      setAuthorizedByPatientAndDoctor((prev) => ({
         ...prev,
-        [currentPatient.id]: nextSet,
+        [currentPatient.id]: {
+          ...(prev[currentPatient.id] || {}),
+          [primaryDocId]: nextSet,
+        },
       }));
       setRequestsByPatient((prev) => {
         const copyForPatient = { ...(prev[currentPatient.id] || {}) };
-        delete copyForPatient[tag];
+        delete copyForPatient[`${primaryDocId}__${tag}`];
         return { ...prev, [currentPatient.id]: copyForPatient };
       });
       await appendAuditLog(
@@ -654,8 +967,8 @@ export default function App() {
         'POLICY_GRANT',
         'SUCCESS',
         lang === 'vi'
-          ? `BN ${currentPatient.name} đã MỞ KHÓA [${row.vietnameseCategory}] cho ${currentPatient.primaryDoctorName}.`
-          : `Patient ${currentPatient.nameEn} UNLOCKED [${row.category}] for ${currentPatient.primaryDoctorNameEn}.`,
+          ? `BN ${currentPatient.name} đã MỞ KHÓA [${row.vietnameseCategory}] cho riêng BS theo dõi chính ${currentPatient.primaryDoctorName}.`
+          : `Patient ${currentPatient.nameEn} UNLOCKED [${row.category}] exclusively for primary doctor ${currentPatient.primaryDoctorNameEn}.`,
         tag
       );
     }
@@ -737,19 +1050,110 @@ export default function App() {
     );
   };
 
+  const handleToggleRevokeSpecificDoctor = async (doc: HospitalDoctor) => {
+    const currentSet = new Set(revokedDoctorsByPatient[currentPatient.id] || []);
+    const isAlreadyRevoked = currentSet.has(doc.id);
+
+    if (isAlreadyRevoked) {
+      currentSet.delete(doc.id);
+      setRevokedDoctorsByPatient((prev) => ({
+        ...prev,
+        [currentPatient.id]: currentSet,
+      }));
+      await appendAuditLog(
+        'PATIENT_SWE',
+        'POLICY_GRANT',
+        'SUCCESS',
+        lang === 'vi'
+          ? `BN ${currentPatient.name} đã CẤP LẠI quyền xem bệnh án cho ${doc.name} (${doc.specialtyVi}).`
+          : `Patient ${currentPatient.nameEn} RESTORED record viewing access for ${doc.nameEn} (${doc.specialtyEn}).`,
+        doc.id
+      );
+    } else {
+      currentSet.add(doc.id);
+      setRevokedDoctorsByPatient((prev) => ({
+        ...prev,
+        [currentPatient.id]: currentSet,
+      }));
+      await appendAuditLog(
+        'PATIENT_SWE',
+        'POLICY_REVOKE',
+        'CRITICAL_BLOCK',
+        lang === 'vi'
+          ? `BN ${currentPatient.name} đã CHỈ ĐỊNH THU HỒI quyền xem bệnh án của riêng ${doc.name} (${doc.specialtyVi}).`
+          : `Patient ${currentPatient.nameEn} REVOKED record viewing access specifically for ${doc.nameEn} (${doc.specialtyEn}).`,
+        doc.id
+      );
+    }
+  };
+
   const handleEmergencyRevokeAll = async () => {
-    setAuthorizedByPatient((prev) => ({
+    const allDocIds = new Set(HOSPITAL_DOCTORS.map((d) => d.id));
+    setRevokedDoctorsByPatient((prev) => ({
       ...prev,
-      [currentPatient.id]: new Set(),
+      [currentPatient.id]: allDocIds,
+    }));
+    const emptyPerDoc: Record<string, Set<string>> = {};
+    HOSPITAL_DOCTORS.forEach((d) => {
+      emptyPerDoc[d.id] = new Set();
+    });
+    setAuthorizedByPatientAndDoctor((prev) => ({
+      ...prev,
+      [currentPatient.id]: emptyPerDoc,
     }));
     await appendAuditLog(
       'PATIENT_SWE',
       'POLICY_REVOKE',
       'CRITICAL_BLOCK',
       lang === 'vi'
-        ? `BN ${currentPatient.name} (${currentPatient.id}) đã THU HỒI TOÀN BỘ quyền xem bệnh án của bác sĩ ngay lập tức.`
+        ? `BN ${currentPatient.name} (${currentPatient.id}) đã THU HỒI TOÀN BỘ quyền xem bệnh án của tất cả bác sĩ ngay lập tức.`
         : `Patient ${currentPatient.nameEn} (${currentPatient.id}) REVOKED ALL doctor decryption sessions immediately.`,
       `patient:${currentPatient.id.toLowerCase()}:*`
+    );
+  };
+
+  const handleRestoreAllDoctors = async () => {
+    setRevokedDoctorsByPatient((prev) => ({
+      ...prev,
+      [currentPatient.id]: new Set(),
+    }));
+    const defaultPerDoc: Record<string, Set<string>> = {};
+    HOSPITAL_DOCTORS.forEach((d) => {
+      if (d.id === currentPatient.primaryDoctorId) {
+        defaultPerDoc[d.id] = new Set([`patient:${currentPatient.id.toLowerCase()}:primary`]);
+      } else {
+        defaultPerDoc[d.id] = new Set();
+      }
+    });
+    setAuthorizedByPatientAndDoctor((prev) => ({
+      ...prev,
+      [currentPatient.id]: defaultPerDoc,
+    }));
+    await appendAuditLog(
+      'PATIENT_SWE',
+      'POLICY_GRANT',
+      'SUCCESS',
+      lang === 'vi'
+        ? `BN ${currentPatient.name} đã khôi phục quyền xem mặc định cho Bác sĩ theo dõi chính ${currentPatient.primaryDoctorName}.`
+        : `Patient ${currentPatient.nameEn} restored default monitoring access for primary doctor ${currentPatient.primaryDoctorNameEn}.`,
+      `patient:${currentPatient.id.toLowerCase()}:primary`
+    );
+  };
+
+  const handleChangePatientAlertLevel = async (level: ConditionAlertLevel) => {
+    setConditionAlertByPatient((prev) => ({
+      ...prev,
+      [currentPatient.id]: level,
+    }));
+    const meta = getAlertMeta(level);
+    await appendAuditLog(
+      'CLINICIAN_SWE',
+      'TAG_ENCRYPT',
+      'SUCCESS',
+      lang === 'vi'
+        ? `${activeDoctor.name} cập nhật mức cảnh báo tình trạng bệnh của ${currentPatient.name} thành [${meta.labelVi}].`
+        : `${activeDoctor.nameEn} updated condition alert level of ${currentPatient.nameEn} to [${meta.labelEn}].`,
+      `patient:${currentPatient.id.toLowerCase()}:alert`
     );
   };
 
@@ -914,7 +1318,10 @@ export default function App() {
                     <>
                       <Lock className="w-3 h-3 text-red-600 shrink-0" />
                       <span>
-                        {t(`Chỉ xem đúng 1 bệnh: ${stCat}`, `Scoped to ONLY 1 disease: ${stCat}`)}
+                        {t(
+                          `Xem các bệnh liên quan chuyên khoa: ${stSpec}`,
+                          `Scoped to specialty-related diseases: ${stSpec}`
+                        )}
                       </span>
                     </>
                   )}
@@ -1084,7 +1491,8 @@ export default function App() {
       <div className="space-y-2 max-h-[540px] overflow-y-auto pr-1">
         {filteredPatients.map((p) => {
           const isSelected = p.id === currentPatient.id;
-          const pGrants = authorizedByPatient[p.id]?.size || 0;
+          const pGrants =
+            authorizedByPatientAndDoctor[p.id]?.[p.primaryDoctorId]?.size || 0;
           const pReqs = Object.keys(requestsByPatient[p.id] || {}).length;
 
           return (
@@ -1156,7 +1564,15 @@ export default function App() {
                   <strong className="text-blue-700">{pDocName(p)}</strong> • {pDocSpec(p)}
                 </div>
                 <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5">
-                  <span>{pStatus(p)}</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded font-bold border ${
+                      getAlertMeta(conditionAlertByPatient[p.id] || 'CAN_CHU_Y').badgeClass
+                    }`}
+                  >
+                    {lang === 'vi'
+                      ? getAlertMeta(conditionAlertByPatient[p.id] || 'CAN_CHU_Y').labelVi
+                      : getAlertMeta(conditionAlertByPatient[p.id] || 'CAN_CHU_Y').labelEn}
+                  </span>
                   <span className="font-semibold text-blue-700">
                     {t(`Mở ${pGrants}/4 bệnh án`, `Unlocked ${pGrants}/4`)}
                   </span>
@@ -1313,6 +1729,18 @@ export default function App() {
                                 <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-blue-100 text-blue-800 font-bold shrink-0">
                                   {p.id}
                                 </span>
+                                <span
+                                  className={`text-[9px] px-1.5 py-0.2 rounded font-bold border shrink-0 ${
+                                    getAlertMeta(conditionAlertByPatient[p.id] || 'CAN_CHU_Y')
+                                      .badgeClass
+                                  }`}
+                                >
+                                  {lang === 'vi'
+                                    ? getAlertMeta(conditionAlertByPatient[p.id] || 'CAN_CHU_Y')
+                                        .labelVi
+                                    : getAlertMeta(conditionAlertByPatient[p.id] || 'CAN_CHU_Y')
+                                        .labelEn}
+                                </span>
                               </div>
                               <div className="text-[10px] text-slate-500 truncate mt-0.5">
                                 {lang === 'vi'
@@ -1446,31 +1874,43 @@ export default function App() {
             <div className="space-y-3 max-h-80 overflow-y-auto">
               {pendingRequestList.map((req) => (
                 <div
-                  key={req.tideTag}
+                  key={req.requestKey}
                   className="p-4 rounded-xl bg-red-50/50 border border-red-200 space-y-2.5"
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-extrabold text-slate-900">
                       {lang === 'vi' ? req.categoryVi : req.categoryEn}
                     </span>
-                    <span className="text-xs font-semibold text-blue-700">
-                      {lang === 'vi' ? req.doctorNameVi : req.doctorNameEn}
+                    <span className="text-xs font-extrabold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+                      {lang === 'vi'
+                        ? `Chỉ mở riêng cho: ${req.doctorNameVi}`
+                        : `Exclusively for: ${req.doctorNameEn}`}
                     </span>
                   </div>
                   <p className="text-xs text-slate-700 leading-relaxed">
                     {lang === 'vi' ? req.reasonVi : req.reasonEn}
                   </p>
+                  <div className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                    🔒{' '}
+                    {t(
+                      `Quy định bảo mật: Khi bạn đồng ý, CHỈ DUY NHẤT ${req.doctorNameVi} xem được hồ sơ này — các bác sĩ khác vẫn bị khóa hoàn toàn!`,
+                      `Strict Isolation Rule: Approving unlocks this record EXCLUSIVELY for ${req.doctorNameEn} — all other doctors remain locked!`
+                    )}
+                  </div>
 
                   <div className="flex items-center gap-2 pt-1">
                     <button
-                      onClick={() => handlePatientApproveRequest(req.tideTag)}
+                      onClick={() => handlePatientApproveRequest(req.requestKey)}
                       className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition-all"
                     >
                       <Check className="w-4 h-4" />
-                      {t('Đồng ý cho Bác sĩ theo dõi', 'Approve Doctor Monitoring')}
+                      {t(
+                        `Đồng ý chỉ cho ${req.doctorNameVi} xem`,
+                        `Approve Exclusively for ${req.doctorNameEn}`
+                      )}
                     </button>
                     <button
-                      onClick={() => handlePatientRejectRequest(req.tideTag)}
+                      onClick={() => handlePatientRejectRequest(req.requestKey)}
                       className="px-3.5 py-2 rounded-xl bg-white hover:bg-red-100 text-slate-600 hover:text-red-700 border border-slate-200 text-xs font-bold flex items-center justify-center gap-1 transition-all"
                     >
                       <X className="w-4 h-4" />
@@ -1492,6 +1932,182 @@ export default function App() {
                 )}
               </button>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* =======================================================================
+          MODAL CỬA SỔ NHỎ CHỈ ĐỊNH BÁC SĨ NÀO KHÔNG ĐƯỢC XEM BỆNH ÁN
+      ======================================================================= */}
+      {showRevokeModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border-2 border-red-200 max-w-xl w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-red-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-red-600/20">
+                  <Flame className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900">
+                    {t(
+                      'Chỉ Định Bác Sĩ Không Được Xem Bệnh Án',
+                      'Specify Which Doctors Cannot View Records'
+                    )}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {t('Hồ sơ Bệnh nhân:', 'Patient Profile:')}{' '}
+                    <strong>{pName(currentPatient)}</strong> ({currentPatient.id}) •{' '}
+                    {t(
+                      'Chọn bác sĩ bạn muốn chặn/thu hồi quyền xem:',
+                      'Select which doctor(s) to block from viewing your records:'
+                    )}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowRevokeModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
+              {HOSPITAL_DOCTORS.map((doc) => {
+                const isBlocked = revokedDoctorsForCurrentPatient.has(doc.id);
+                const isPrimary = doc.id === currentPatient.primaryDoctorId;
+                const stageMatch = currentCareStages.find((st) => st.doctorId === doc.id);
+
+                return (
+                  <div
+                    key={doc.id}
+                    className={`p-3.5 rounded-xl border transition-all flex items-center justify-between gap-3 ${
+                      isBlocked
+                        ? 'bg-red-50/70 border-red-300'
+                        : isPrimary || stageMatch
+                        ? 'bg-blue-50/50 border-blue-200'
+                        : 'bg-slate-50 border-slate-200'
+                    }`}
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs font-extrabold text-slate-900">
+                          {dName(doc)}
+                        </span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-white border border-slate-200 text-slate-600">
+                          {dSpec(doc)}
+                        </span>
+                        {isPrimary ? (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white">
+                            {t('Bác sĩ theo dõi chính', 'Primary Monitoring Doctor')}
+                          </span>
+                        ) : stageMatch ? (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800 border border-sky-200">
+                            {t(
+                              `BS chuyên khoa (${stageMatch.diseaseCategoryVi})`,
+                              `Specialist (${stageMatch.diseaseCategoryEn})`
+                            )}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="text-[11px]">
+                        {isBlocked ? (
+                          <span className="font-bold text-red-600">
+                            🚫{' '}
+                            {t(
+                              'Đã bị chặn — Không được phép xem bất kỳ bệnh án nào của bạn',
+                              'Blocked — Cannot view any of your medical records'
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-slate-600">
+                            🟢{' '}
+                            {isPrimary
+                              ? t(
+                                  `BS theo dõi chính: Đang được xem ${
+                                    authorizedByPatientAndDoctor[currentPatient.id]?.[doc.id]
+                                      ?.size || 0
+                                  }/4 bệnh án bạn mở khóa`,
+                                  `Primary Doctor: Permitted to view ${
+                                    authorizedByPatientAndDoctor[currentPatient.id]?.[doc.id]
+                                      ?.size || 0
+                                  }/4 unlocked records`
+                                )
+                              : (authorizedByPatientAndDoctor[currentPatient.id]?.[doc.id]
+                                  ?.size || 0) > 0
+                              ? t(
+                                  `BS chuyên khoa: Đang xem ${
+                                    authorizedByPatientAndDoctor[currentPatient.id]?.[doc.id]
+                                      ?.size || 0
+                                  } bệnh liên quan đến chuyên khoa [${doc.specialtyVi}]`,
+                                  `Specialist Doctor: Permitted to view ${
+                                    authorizedByPatientAndDoctor[currentPatient.id]?.[doc.id]
+                                      ?.size || 0
+                                  } specialty-related records [${doc.specialtyEn}]`
+                                )
+                              : t(
+                                  'Chưa được cấp quyền xem bệnh án nào (Muốn xem phải gửi yêu cầu riêng)',
+                                  'No records unlocked (Must send an individual request to view)'
+                                )}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleToggleRevokeSpecificDoctor(doc)}
+                      className={`shrink-0 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm ${
+                        isBlocked
+                          ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                          : 'bg-red-600 hover:bg-red-700 text-white'
+                      }`}
+                    >
+                      {isBlocked ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" />
+                          {t('Cho phép xem lại', 'Restore Access')}
+                        </>
+                      ) : (
+                        <>
+                          <XCircle className="w-3.5 h-3.5" />
+                          {t('Không cho xem', 'Revoke This Doctor')}
+                        </>
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+              <button
+                onClick={handleEmergencyRevokeAll}
+                className="flex-1 py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-sm transition-all"
+              >
+                <Flame className="w-4 h-4" />
+                {t(
+                  '🔥 Thu hồi TẤT CẢ các Bác sĩ cùng lúc',
+                  '🔥 Revoke ALL Doctors at Once'
+                )}
+              </button>
+
+              {revokedDoctorsForCurrentPatient.size > 0 && (
+                <button
+                  onClick={handleRestoreAllDoctors}
+                  className="py-2.5 px-4 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-bold transition-all"
+                >
+                  {t('Khôi phục mặc định', 'Restore Default')}
+                </button>
+              )}
+
+              <button
+                onClick={() => setShowRevokeModal(false)}
+                className="py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-all"
+              >
+                {t('Đóng cửa sổ', 'Close')}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1837,8 +2453,14 @@ export default function App() {
                       <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-white/20 text-white border border-white/30">
                         {currentPatient.age} {t('tuổi', 'yo')} • {pGender(currentPatient)}
                       </span>
-                      <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-400/25 text-emerald-50 border border-emerald-300/40">
-                        {pStatus(currentPatient)}
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold border shadow-sm ${
+                          getAlertMeta(currentPatientAlert).bannerClass
+                        }`}
+                      >
+                        {lang === 'vi'
+                          ? getAlertMeta(currentPatientAlert).fullVi
+                          : getAlertMeta(currentPatientAlert).fullEn}
                       </span>
                     </div>
 
@@ -1881,11 +2503,20 @@ export default function App() {
                   </button>
 
                   <button
-                    onClick={handleEmergencyRevokeAll}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-white/15 hover:bg-red-600 text-white border border-white/30 transition-all"
+                    onClick={() => setShowRevokeModal(true)}
+                    className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all border ${
+                      revokedDoctorsForCurrentPatient.size > 0
+                        ? 'bg-red-600 hover:bg-red-700 text-white border-red-300 shadow-md'
+                        : 'bg-white/15 hover:bg-red-600 text-white border-white/30'
+                    }`}
                   >
                     <Flame className="w-4 h-4" />
-                    {t('Thu hồi quyền Bác sĩ', 'Revoke Doctor Access')}
+                    {revokedDoctorsForCurrentPatient.size > 0
+                      ? t(
+                          `Thu hồi quyền Bác sĩ (${revokedDoctorsForCurrentPatient.size} BS bị chặn)`,
+                          `Revoke Doctor Access (${revokedDoctorsForCurrentPatient.size} Blocked)`
+                        )
+                      : t('Thu hồi quyền Bác sĩ (Chỉ định BS)', 'Revoke Doctor Access (Select Doctor)')}
                   </button>
 
                   {pendingCount > 0 && (
@@ -1999,16 +2630,25 @@ export default function App() {
                   <div className="space-y-2.5">
                     {encryptedRows.map((row) => {
                       const isGranted = authorizedTags.has(row.tideTag);
-                      const isRequested = Boolean(pendingRequests[row.tideTag]);
-                      const matchingStage = currentCareStages.find(
-                        (st) => st.targetTideTag === row.tideTag && st.roleType !== 'PRIMARY_MONITOR'
+                      const pendingForThisRow = Object.values(pendingRequests).filter(
+                        (r) => r.tideTag === row.tideTag
+                      );
+                      const isRequested = pendingForThisRow.length > 0;
+                      const permittedDoctorsForRow = HOSPITAL_DOCTORS.filter(
+                        (d) =>
+                          !revokedDoctorsForCurrentPatient.has(d.id) &&
+                          Boolean(
+                            authorizedByPatientAndDoctor[currentPatient.id]?.[d.id]?.has(
+                              row.tideTag
+                            )
+                          )
                       );
 
                       return (
                         <div
                           key={row.id}
                           onClick={() => {
-                            if (isRequested && !isGranted) {
+                            if (isRequested) {
                               setShowBellModal(true);
                             } else {
                               handleToggleTagAccess(row);
@@ -2025,7 +2665,7 @@ export default function App() {
                           <div className="flex items-start gap-3">
                             <div className="w-9 h-9 rounded-xl bg-white border border-slate-200 shadow-sm flex items-center justify-center shrink-0 mt-0.5 relative">
                               {getCategoryIcon(row.vietnameseCategory)}
-                              {isRequested && !isGranted && (
+                              {isRequested && (
                                 <span className="w-4 h-4 rounded-full bg-red-600 text-white flex items-center justify-center absolute -top-1.5 -right-1.5 shadow">
                                   <BellRing className="w-2.5 h-2.5 animate-bounce" />
                                 </span>
@@ -2034,24 +2674,54 @@ export default function App() {
                             <div>
                               <div className="flex flex-wrap items-center gap-1.5">
                                 <h3 className="text-xs font-bold text-slate-900">{rCat(row)}</h3>
+                                <span
+                                  className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                                    getAlertMeta(getRowAlertLevel(row)).badgeClass
+                                  }`}
+                                >
+                                  {lang === 'vi'
+                                    ? getAlertMeta(getRowAlertLevel(row)).labelVi
+                                    : getAlertMeta(getRowAlertLevel(row)).labelEn}
+                                </span>
                               </div>
                               <p className="text-[11px] text-slate-500 mt-0.5">{rTitle(row)}</p>
-                              {matchingStage && matchingStage.isReferred && (
-                                <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded border border-sky-200">
-                                  {t(
-                                    `🤝 BS chuyên khoa ${matchingStage.doctorName} chỉ được xem riêng bệnh này (${matchingStage.completionPercent}%)`,
-                                    `🤝 Specialist ${matchingStage.doctorNameEn} only views this 1 record (${matchingStage.completionPercent}%)`
-                                  )}
-                                </span>
-                              )}
-                              {isRequested && !isGranted && (
+
+                              {/* Show exactly which specific doctor(s) are currently authorized to view this record */}
+                              <div className="mt-1 flex flex-wrap items-center gap-1">
+                                {permittedDoctorsForRow.length > 0 ? (
+                                  permittedDoctorsForRow.map((d) => (
+                                    <span
+                                      key={d.id}
+                                      className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-800 bg-blue-100/80 px-2 py-0.5 rounded border border-blue-200"
+                                    >
+                                      👁️{' '}
+                                      {lang === 'vi'
+                                        ? `Chỉ ${d.name} được xem`
+                                        : `Only ${d.nameEn} can view`}
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                    🔒{' '}
+                                    {t(
+                                      'Chưa bác sĩ nào được xem (Muốn xem phải gửi yêu cầu)',
+                                      'No doctor can view (Must request access)'
+                                    )}
+                                  </span>
+                                )}
+                              </div>
+
+                              {isRequested && (
                                 <div className="mt-1">
                                   <span className="inline-flex items-center gap-1 text-[11px] font-bold text-red-600">
                                     <BellRing className="w-3 h-3" />
-                                    {t(
-                                      'Có yêu cầu theo dõi tình trạng (Bấm để duyệt)',
-                                      'Status monitoring request (Click to review)'
-                                    )}
+                                    {lang === 'vi'
+                                      ? `🔔 Yêu cầu mở riêng cho: ${pendingForThisRow
+                                          .map((r) => r.doctorNameVi)
+                                          .join(', ')} (Bấm để duyệt)`
+                                      : `🔔 Request exclusively from: ${pendingForThisRow
+                                          .map((r) => r.doctorNameEn)
+                                          .join(', ')} (Click to approve)`}
                                   </span>
                                 </div>
                               )}
@@ -2072,7 +2742,7 @@ export default function App() {
                             {isGranted ? (
                               <>
                                 <Unlock className="w-3 h-3 stroke-[2.5]" />
-                                {t('Đang mở', 'Unlocked')}
+                                {t('Đang mở (BS chính)', 'Unlocked (Primary)')}
                               </>
                             ) : (
                               <>
@@ -2130,12 +2800,21 @@ export default function App() {
                       <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-200 text-slate-700">
                         {currentPatient.age} {t('tuổi', 'yo')} • {pGender(currentPatient)}
                       </span>
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold border ${
+                          getAlertMeta(currentPatientAlert).badgeClass
+                        }`}
+                      >
+                        {lang === 'vi'
+                          ? getAlertMeta(currentPatientAlert).fullVi
+                          : getAlertMeta(currentPatientAlert).fullEn}
+                      </span>
                       <span className="text-xs font-mono text-slate-500">
                         {t('Khóa phiên:', 'Session Key:')} {activeDoctor.sweKey}
                       </span>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                       <span
                         className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold ${
                           isPrimaryMonitoringDoctor
@@ -2153,9 +2832,53 @@ export default function App() {
                               `🤝 Referred Specialist Doctor: ${activeDoctor.nameEn} (${activeDoctor.specialtyEn})`
                             )}
                       </span>
+
+                      {/* 4-tier Clinical Condition Alert Selector for Doctor */}
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="text-[11px] font-bold text-slate-600 mr-1">
+                          {t('Cảnh báo tình trạng bệnh:', 'Condition Alert:')}
+                        </span>
+                        {(['NHE', 'CAN_CHU_Y', 'NANG', 'NGUY_CAP'] as ConditionAlertLevel[]).map(
+                          (lvl) => {
+                            const meta = getAlertMeta(lvl);
+                            const active = currentPatientAlert === lvl;
+                            return (
+                              <button
+                                key={lvl}
+                                onClick={() => handleChangePatientAlertLevel(lvl)}
+                                className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition-all ${
+                                  active
+                                    ? `${meta.bannerClass} shadow-sm scale-105`
+                                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                                }`}
+                              >
+                                {lang === 'vi' ? meta.labelVi : meta.labelEn}
+                              </button>
+                            );
+                          }
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
+
+                {isCurrentDoctorRevoked && (
+                  <div className="w-full px-4 py-3 rounded-xl bg-red-600 text-white text-xs font-bold flex flex-wrap items-center justify-between gap-2 shadow-md">
+                    <span>
+                      🚫{' '}
+                      {t(
+                        `BỆNH NHÂN ĐÃ CHỈ ĐỊNH THU HỒI QUYỀN XEM CỦA ${activeDoctor.name}: Bác sĩ này hiện không được phép xem bất kỳ bệnh án nào của ${currentPatient.name}!`,
+                        `PATIENT REVOKED ACCESS FOR ${activeDoctor.nameEn}: This doctor is blocked from viewing any records of ${currentPatient.nameEn}!`
+                      )}
+                    </span>
+                    <button
+                      onClick={() => setShowRevokeModal(true)}
+                      className="px-3 py-1 rounded-lg bg-white text-red-700 font-extrabold text-[11px] hover:bg-red-50 transition-all"
+                    >
+                      {t('Mở cửa sổ chỉ định Bác sĩ ➔', 'Open Doctor Revocation Modal ➔')}
+                    </button>
+                  </div>
+                )}
 
                 {/* ROW 2: FULL-WIDTH HORIZONTAL SCOPE & CORRELATION BOX */}
                 <div className="w-full px-4 py-2.5 rounded-xl bg-blue-50/80 border border-blue-200 text-xs text-slate-700 leading-relaxed">
@@ -2163,16 +2886,19 @@ export default function App() {
                     <span>
                       👁️{' '}
                       <strong className="text-blue-900">
-                        {t('Quyền Bác sĩ theo dõi chính:', 'Primary Monitoring Doctor Scope:')}
+                        {t(
+                          'Quy định Bác sĩ theo dõi chính (Xem đa bệnh tổng thể):',
+                          'Primary Monitoring Doctor Rule (Holistic Multi-Disease View):'
+                        )}
                       </strong>{' '}
                       {t(
-                        'Xem được nhiều bệnh (khi BN mở khóa) để chẩn đoán tổng thể chuỗi bệnh lý',
-                        'Views consented multi-specialty records to diagnose the root-cause chain'
+                        `BS theo dõi chính ${activeDoctor.name} được yêu cầu & xem toàn bộ các bệnh liên quan`,
+                        `Primary Doctor ${activeDoctor.nameEn} can request & view all related diseases`
                       )}{' '}
-                      <strong className="text-blue-800">[{pChain(currentPatient)}]</strong>{' '}
+                      <strong className="text-blue-800">[{pChain(currentPatient)}]</strong>.{' '}
                       {t(
-                        '& gửi yêu cầu cho Bác sĩ chuyên khoa sửa từng bệnh.',
-                        '& delegates single-disease access to specialist doctors.'
+                        'Khi bác sĩ gửi yêu cầu được duyệt, chỉ riêng bác sĩ đó xem được — các bác sĩ khác muốn xem phải tự gửi yêu cầu!',
+                        'When a doctor’s request is approved, ONLY that requesting doctor can view it — other doctors must request separately!'
                       )}
                     </span>
                   ) : (
@@ -2180,13 +2906,13 @@ export default function App() {
                       🔒{' '}
                       <strong className="text-sky-900">
                         {t(
-                          `Quyền Bác sĩ chuyên khoa phối hợp (được ${currentPatient.primaryDoctorName} gửi yêu cầu):`,
-                          `Referred Specialist Scope (delegated by ${currentPatient.primaryDoctorNameEn}):`
+                          `Quy định Bác sĩ Chuyên khoa (${activeDoctor.name} — ${activeDoctor.specialtyVi}):`,
+                          `Specialist Doctor Rule (${activeDoctor.nameEn} — ${activeDoctor.specialtyEn}):`
                         )}
                       </strong>{' '}
                       {t(
-                        `CHỈ XEM ĐƯỢC ĐÚNG 1 BỆNH thuộc chuyên khoa [${activeDoctor.specialtyVi}], các bệnh khác đều bị khóa!`,
-                        `ONLY PERMITTED TO VIEW THE 1 CONDITION matching [${activeDoctor.specialtyEn}]; all other records remain locked!`
+                        `Bác sĩ chuyên khoa được phép yêu cầu & xem TẤT CẢ các bệnh (1 hoặc nhiều bệnh, hiện có ${allowedSpecialtyTagsForActiveSecondaryDoctor.size}/4 bệnh) có liên quan đến chuyên khoa [${activeDoctor.specialtyVi}] của mình. Các bệnh không liên quan đến chuyên khoa vẫn bị khóa!`,
+                        `Specialist doctors can request & view ALL diseases (1 or multiple, currently ${allowedSpecialtyTagsForActiveSecondaryDoctor.size}/4 records) related to their specialty [${activeDoctor.specialtyEn}]. Unrelated specialty records remain locked!`
                       )}
                     </span>
                   )}
@@ -2209,12 +2935,17 @@ export default function App() {
                     )}
                     {pendingCount > 0
                       ? t(
-                          `🔔 Đã gửi yêu cầu mở khóa (${pendingCount} bệnh) tới BN ${pName(currentPatient)}`,
-                          `🔔 Sent Unlock Request (${pendingCount} records) to ${pName(currentPatient)}`
+                          `🔔 Đã gửi yêu cầu mở khóa (${pendingCount} yêu cầu) tới BN ${pName(currentPatient)}`,
+                          `🔔 Sent Unlock Request (${pendingCount} pending) to ${pName(currentPatient)}`
+                        )
+                      : isPrimaryMonitoringDoctor
+                      ? t(
+                          `📨 Yêu cầu BN mở khóa các bệnh liên quan (Cho riêng ${activeDoctor.name})`,
+                          `📨 Request Patient to Unlock Related Records (For ${activeDoctor.nameEn})`
                         )
                       : t(
-                          '📨 Yêu cầu BN mở khóa các bệnh liên quan',
-                          '📨 Request Patient to Unlock Related Records'
+                          `📨 Yêu cầu BN mở khóa các bệnh liên quan chuyên khoa (${allowedSpecialtyTagsForActiveSecondaryDoctor.size} bệnh — ${activeDoctor.specialtyVi})`,
+                          `📨 Request Unlock for All Specialty-Related Records (${allowedSpecialtyTagsForActiveSecondaryDoctor.size} records — ${activeDoctor.specialtyEn})`
                         )}
                   </button>
 
@@ -2291,11 +3022,27 @@ export default function App() {
                 {encryptedRows.map((row) => {
                   const decrypted = decryptedViews[row.tideTag];
                   const isUnlockedForActiveDoctor = Boolean(decrypted);
-                  const isPending = Boolean(pendingRequests[row.tideTag]);
+                  const reqKeyForActiveDoc = `${activeDoctor.id}__${row.tideTag}`;
+                  const isPending = Boolean(pendingRequests[reqKeyForActiveDoc]);
+                  const isAllowedSpecialtyForDoctor =
+                    isPrimaryMonitoringDoctor ||
+                    allowedSpecialtyTagsForActiveSecondaryDoctor.has(row.tideTag);
                   const errorMsg = clinicianErrors[row.tideTag];
 
                   const specialistStage = currentCareStages.find(
                     (st) => st.targetTideTag === row.tideTag && st.roleType !== 'PRIMARY_MONITOR'
+                  );
+
+                  // Check if another doctor is permitted to view this record while the current doctor is NOT
+                  const otherPermittedDocs = HOSPITAL_DOCTORS.filter(
+                    (d) =>
+                      d.id !== activeDoctor.id &&
+                      !revokedDoctorsForCurrentPatient.has(d.id) &&
+                      Boolean(
+                        authorizedByPatientAndDoctor[currentPatient.id]?.[d.id]?.has(
+                          row.tideTag
+                        )
+                      )
                   );
 
                   return (
@@ -2304,8 +3051,10 @@ export default function App() {
                       className={`rounded-2xl p-5 border transition-all ${
                         isUnlockedForActiveDoctor
                           ? 'bg-white border-blue-300 shadow-md'
-                          : isPending && isPrimaryMonitoringDoctor
+                          : isPending
                           ? 'bg-red-50/30 border-2 border-red-200 shadow-sm'
+                          : !isAllowedSpecialtyForDoctor
+                          ? 'bg-slate-100/70 border-slate-200 opacity-85'
                           : 'bg-white border-slate-200'
                       }`}
                     >
@@ -2315,43 +3064,68 @@ export default function App() {
                             {getCategoryIcon(row.vietnameseCategory)}
                           </div>
                           <div>
-                            <h3 className="text-base font-extrabold text-slate-900">{rCat(row)}</h3>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-base font-extrabold text-slate-900">{rCat(row)}</h3>
+                              <span
+                                className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                                  getAlertMeta(getRowAlertLevel(row)).badgeClass
+                                }`}
+                              >
+                                {lang === 'vi'
+                                  ? getAlertMeta(getRowAlertLevel(row)).fullVi
+                                  : getAlertMeta(getRowAlertLevel(row)).fullEn}
+                              </span>
+                            </div>
                             <p className="text-xs text-slate-500">
                               {rTitle(row)} • {rFac(row)}
                             </p>
                           </div>
                         </div>
 
-                        {isUnlockedForActiveDoctor ? (
+                        {isCurrentDoctorRevoked ? (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-red-600 text-white shadow-sm">
+                            <XCircle className="w-4 h-4" />
+                            {t(
+                              `BỆNH NHÂN ĐÃ CHẶN ${activeDoctor.name.toUpperCase()}`,
+                              `REVOKED BY PATIENT (${activeDoctor.nameEn.toUpperCase()})`
+                            )}
+                          </span>
+                        ) : isUnlockedForActiveDoctor ? (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
                             <CheckCircle2 className="w-4 h-4 text-blue-600" />
                             {isPrimaryMonitoringDoctor
-                              ? t('BÁC SĨ THEO DÕI ĐANG XEM', 'MONITORING DOCTOR VIEWING')
+                              ? t(
+                                  `CHỈ ${activeDoctor.name.toUpperCase()} ĐANG ĐƯỢC XEM`,
+                                  `UNLOCKED FOR ${activeDoctor.nameEn.toUpperCase()}`
+                                )
                               : t(
-                                  'ĐÚNG CHUYÊN KHOA ĐƯỢC GIAO (CHO PHÉP SỬA BỆNH)',
-                                  'ASSIGNED SPECIALTY (AUTHORIZED TO TREAT)'
+                                  `BỆNH LIÊN QUAN CHUYÊN KHOA — MỞ RIÊNG CHO ${activeDoctor.name.toUpperCase()}`,
+                                  `SPECIALTY-RELATED — UNLOCKED FOR ${activeDoctor.nameEn.toUpperCase()}`
                                 )}
                           </span>
-                        ) : !isPrimaryMonitoringDoctor ? (
+                        ) : !isAllowedSpecialtyForDoctor ? (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-200">
                             <Lock className="w-3.5 h-3.5 text-red-600" />
                             {t(
                               `KHÓA NGOÀI CHUYÊN KHOA (${activeDoctor.specialtyVi})`,
-                              `LOCKED OUTSIDE SPECIALTY (${activeDoctor.specialtyEn})`
+                              `OUTSIDE SPECIALTY (${activeDoctor.specialtyEn})`
                             )}
                           </span>
                         ) : isPending ? (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-200">
                             <BellRing className="w-3.5 h-3.5 text-red-600 animate-bounce" />
                             {t(
-                              'ĐÃ BÁO CHUÔNG ĐỎ CHO BỆNH NHÂN',
-                              'RED BELL ALERT SENT TO PATIENT'
+                              `ĐÃ GỬI YÊU CẦU MỞ RIÊNG CHO ${activeDoctor.name.toUpperCase()}`,
+                              `REQUEST SENT FOR ${activeDoctor.nameEn.toUpperCase()}`
                             )}
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">
                             <Lock className="w-3.5 h-3.5 text-red-600" />
-                            {t('ĐANG KHÓA', 'LOCKED')}
+                            {t(
+                              `BỆNH LIÊN QUAN CHUYÊN KHOA (ĐANG KHÓA VỚI ${activeDoctor.name.toUpperCase()})`,
+                              `SPECIALTY-RELATED (LOCKED FOR ${activeDoctor.nameEn.toUpperCase()})`
+                            )}
                           </span>
                         )}
                       </div>
@@ -2494,7 +3268,7 @@ export default function App() {
                         </div>
                       ) : (
                         <div className="mt-4 pt-4 border-t border-slate-100 space-y-3">
-                          {row.correlationSignal && (
+                          {row.correlationSignal && isAllowedSpecialtyForDoctor && (
                             <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800 leading-relaxed">
                               {lang === 'vi'
                                 ? row.correlationSignal.viSummary
@@ -2502,80 +3276,104 @@ export default function App() {
                             </div>
                           )}
 
-                          {!isPrimaryMonitoringDoctor && (
-                            <div className="p-2.5 rounded-xl bg-sky-50/70 border border-sky-200 text-xs text-slate-700 flex items-center justify-between gap-2">
-                              <span>
-                                🔒 <strong>{t('Hồ sơ Chuyên khoa phối hợp:', 'Specialist Consultation Record:')}</strong>{' '}
-                                {t(
-                                  `Hồ sơ [${row.vietnameseCategory}] cần sự đồng ý cấp quyền từ BN ${currentPatient.name}. Bác sĩ ${activeDoctor.name} có thể bấm gửi yêu cầu mở khóa bên dưới:`,
-                                  `Record [${row.category}] requires cryptographic consent from ${currentPatient.nameEn}. Dr. ${activeDoctor.nameEn} can request access below:`
-                                )}
-                              </span>
+                          {otherPermittedDocs.length > 0 && (
+                            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 font-medium">
+                              🔐{' '}
+                              {lang === 'vi'
+                                ? `Bệnh án này hiện CHỈ mở cho [${otherPermittedDocs
+                                    .map((d) => d.name)
+                                    .join(', ')}]. Bác sĩ ${activeDoctor.name} chưa được cấp quyền xem!`
+                                : `This record is currently ONLY unlocked for [${otherPermittedDocs
+                                    .map((d) => d.nameEn)
+                                    .join(', ')}]. ${activeDoctor.nameEn} does NOT have access!`}
                             </div>
                           )}
 
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <button
-                                onClick={() => handleDoctorSendUnlockRequest(row)}
-                                className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-sm ${
-                                  isPending
-                                    ? 'bg-amber-500 hover:bg-amber-600 text-white'
-                                    : 'bg-blue-600 hover:bg-blue-700 text-white'
-                                }`}
-                              >
-                                <BellRing className={`w-3.5 h-3.5 ${isPending ? 'animate-bounce' : ''}`} />
-                                {isPending
-                                  ? t(
-                                      '🔔 Đã gửi chuông yêu cầu tới Bệnh nhân',
-                                      '🔔 Unlock Request Sent to Patient'
-                                    )
-                                  : t(
-                                      '📨 Yêu cầu Bệnh nhân mở khóa hồ sơ này',
-                                      '📨 Request Patient to Unlock This Record'
+                          {isAllowedSpecialtyForDoctor ? (
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                  onClick={() => handleDoctorSendUnlockRequest(row)}
+                                  className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-sm ${
+                                    isPending
+                                      ? 'bg-amber-500 hover:bg-amber-600 text-white'
+                                      : 'bg-blue-600 hover:bg-blue-700 text-white'
+                                  }`}
+                                >
+                                  <BellRing className={`w-3.5 h-3.5 ${isPending ? 'animate-bounce' : ''}`} />
+                                  {isPending
+                                    ? t(
+                                        `🔔 Đã gửi yêu cầu mở riêng cho ${activeDoctor.name}`,
+                                        `🔔 Request Sent Exclusively for ${activeDoctor.nameEn}`
+                                      )
+                                    : t(
+                                        `📨 Yêu cầu BN mở khóa hồ sơ này (Chỉ cho ${activeDoctor.name})`,
+                                        `📨 Request Patient to Unlock (Exclusively for ${activeDoctor.nameEn})`
+                                      )}
+                                </button>
+
+                                {isPending && (
+                                  <button
+                                    onClick={() => {
+                                      setPortal('PATIENT');
+                                      setShowBellModal(true);
+                                    }}
+                                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-700 text-white shadow-sm transition-all animate-pulse"
+                                  >
+                                    <BellRing className="w-3.5 h-3.5 animate-bounce" />
+                                    {t(
+                                      `Mở chuông duyệt bên BN (${currentPatient.id}) ➔`,
+                                      `Open Approval on Patient (${currentPatient.id}) ➔`
                                     )}
+                                  </button>
+                                )}
+
+                                {isPrimaryMonitoringDoctor &&
+                                  specialistStage &&
+                                  !specialistStage.isReferred && (
+                                    <button
+                                      onClick={() => handleReferToSpecialistDoctor(specialistStage)}
+                                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 transition-all"
+                                    >
+                                      <Send className="w-3.5 h-3.5 text-sky-600" />
+                                      {t(
+                                        `Nhờ ${specialistStage.doctorName} (${specialistStage.specialtyVi}) sửa bệnh này`,
+                                        `Refer to ${specialistStage.doctorNameEn} (${specialistStage.specialtyEn})`
+                                      )}
+                                    </button>
+                                  )}
+                              </div>
+
+                              <button
+                                onClick={() => handleAttemptUnauthorizedDecrypt(row)}
+                                className="px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 border border-slate-200 transition-all"
+                              >
+                                {t(
+                                  'Thử tự mở không xin phép',
+                                  'Attempt Unauthorized Decrypt'
+                                )}
                               </button>
-
-                              {isPending && (
-                                <button
-                                  onClick={() => {
-                                    setPortal('PATIENT');
-                                    setShowBellModal(true);
-                                  }}
-                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-700 text-white shadow-sm transition-all animate-pulse"
-                                >
-                                  <BellRing className="w-3.5 h-3.5 animate-bounce" />
-                                  {t(
-                                    `Mở chuông duyệt bên BN (${currentPatient.id}) ➔`,
-                                    `Open Approval on Patient (${currentPatient.id}) ➔`
-                                  )}
-                                </button>
-                              )}
-
-                              {specialistStage && !specialistStage.isReferred && (
-                                <button
-                                  onClick={() => handleReferToSpecialistDoctor(specialistStage)}
-                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 transition-all"
-                                >
-                                  <Send className="w-3.5 h-3.5 text-sky-600" />
-                                  {t(
-                                    `Nhờ ${specialistStage.doctorName} (${specialistStage.specialtyVi}) sửa bệnh này`,
-                                    `Refer to ${specialistStage.doctorNameEn} (${specialistStage.specialtyEn})`
-                                  )}
-                                </button>
-                              )}
                             </div>
-
-                            <button
-                              onClick={() => handleAttemptUnauthorizedDecrypt(row)}
-                              className="px-3 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 border border-slate-200 transition-all"
-                            >
-                              {t(
-                                'Thử tự mở không xin phép',
-                                'Attempt Unauthorized Decrypt'
-                              )}
-                            </button>
-                          </div>
+                          ) : (
+                            <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-100 border border-slate-200">
+                              <span className="text-xs font-bold text-slate-600">
+                                🚫{' '}
+                                {t(
+                                  `Bệnh [${row.vietnameseCategory}] không thuộc phạm vi chuyên khoa [${activeDoctor.specialtyVi}] nên ${activeDoctor.name} không được phép xem hay yêu cầu mở khóa!`,
+                                  `Record [${row.category}] is outside the specialty scope of [${activeDoctor.specialtyEn}], so ${activeDoctor.nameEn} cannot view or request it!`
+                                )}
+                              </span>
+                              <button
+                                onClick={() => handleAttemptUnauthorizedDecrypt(row)}
+                                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-red-50 text-slate-600 hover:text-red-700 border border-slate-300 transition-all shrink-0"
+                              >
+                                {t(
+                                  'Thử tự mở (Sẽ bị chặn)',
+                                  'Attempt Decrypt (Blocked)'
+                                )}
+                              </button>
+                            </div>
+                          )}
 
                           {errorMsg && (
                             <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium flex items-center gap-2">
@@ -2747,7 +3545,8 @@ export default function App() {
                 <div className="space-y-2.5 max-h-[520px] overflow-y-auto pr-1">
                   {filteredPatients.map((item) => {
                     const isSelected = currentPatient.id === item.id;
-                    const activeCount = authorizedByPatient[item.id]?.size || 0;
+                    const activeCount =
+                      authorizedByPatientAndDoctor[item.id]?.[item.primaryDoctorId]?.size || 0;
                     return (
                       <div
                         key={item.id}
