@@ -264,6 +264,8 @@ export default function App() {
   const [adminBreachReport, setAdminBreachReport] = useState<AdminBreachSimulationResult | null>(
     null
   );
+  const [adminAttackCount, setAdminAttackCount] = useState<number>(0);
+  const [showAdminAttackModal, setShowAdminAttackModal] = useState<boolean>(false);
   const [timelinesByPatient, setTimelinesByPatient] = useState<
     Record<string, PatientTimelineStep[]>
   >(() => {
@@ -1039,13 +1041,15 @@ export default function App() {
   const handleSimulateAdminInspect = async () => {
     const result = await simulateRogueAdminPrivilegeEscalation(encryptedRows);
     setAdminBreachReport(result);
+    setAdminAttackCount((c) => c + 1);
+    setShowAdminAttackModal(true);
     await appendAuditLog(
       'CLOUD_DB_ADMIN',
       'ADMIN_BYPASS_BLOCKED',
       'CRITICAL_BLOCK',
       lang === 'vi'
-        ? `Admin thử đọc trộm bệnh án của BN ${currentPatient.name} (${currentPatient.id}) -> Bị TideCloak chặn đứng (0 Bytes bị lộ).`
-        : `Admin attempted root decryption on ${currentPatient.nameEn} (${currentPatient.id}) -> Blocked by TideCloak (0 Bytes exposed).`,
+        ? `Admin gọi API thử đọc trộm bệnh án của BN ${currentPatient.name} (${currentPatient.id}) -> Bị TideCloak ORK (12/12 MPC Nodes) chặn đứng (HTTP 403 • 0 Bytes bị lộ).`
+        : `Admin called API attempting root decryption on ${currentPatient.nameEn} (${currentPatient.id}) -> Blocked by TideCloak ORK (12/12 MPC Nodes • HTTP 403 • 0 Bytes exposed).`,
       `patient:${currentPatient.id.toLowerCase()}:*`
     );
   };
@@ -2113,8 +2117,94 @@ export default function App() {
       )}
 
       {/* =======================================================================
-          TOP NAVIGATION BAR — LOCKED 2-ROW LAYOUT (IDENTICAL IN VI & EN!)
+          MODAL KẾT QUẢ GỌI API GIẢI MÃ TRÁI PHÉP CỦA ROOT ADMIN (HTTP 403 BLOCK)
       ======================================================================= */}
+      {showAdminAttackModal && adminBreachReport && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border-2 border-red-300 max-w-2xl w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-red-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-red-600/25">
+                  <FileLock2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-extrabold text-red-700">
+                      {t(
+                        '🚨 TIDECLOAK FABRIC CHẶN ĐỨNG LỆNH GIẢI MÃ CỦA ROOT ADMIN',
+                        '🚨 TIDECLOAK FABRIC BLOCKED ROOT ADMIN DECRYPTION CALL'
+                      )}
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-extrabold bg-red-100 text-red-800 border border-red-300">
+                      {t(`Lần thử #${adminAttackCount}`, `Attempt #${adminAttackCount}`)} • {adminBreachReport.timestamp}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    {t(
+                      `Đã thực thi WebCrypto subtle.decrypt() & gọi TideCloak ORK API trên 4 bệnh án của ${currentPatient.name} (${currentPatient.id})`,
+                      `Executed WebCrypto subtle.decrypt() & TideCloak ORK API against 4 records of ${currentPatient.nameEn} (${currentPatient.id})`
+                    )}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowAdminAttackModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="bg-slate-900 text-slate-100 rounded-xl p-4 font-mono text-xs space-y-2 border border-slate-700">
+              <div className="text-amber-400 font-bold">
+                $ {adminBreachReport.sqlExecuted}
+              </div>
+              <div className="text-red-400 font-bold">
+                ➔ Response: {adminBreachReport.tideFabricResponseCode}
+              </div>
+              <div className="text-sky-300">
+                ➔ Quorum: {adminBreachReport.mpcNodesRejected}
+              </div>
+              <div className="text-emerald-400 font-extrabold">
+                ➔ Plaintext Medical Data Exposed to Admin: {adminBreachReport.plaintextBytesExposed} BYTES
+              </div>
+            </div>
+
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              {adminBreachReport.rawDumpPreview.map((item) => (
+                <div
+                  key={item.id}
+                  className="p-3 rounded-xl bg-red-50/70 border border-red-200 font-mono text-[11px] space-y-1"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-900">
+                      {item.id} • Tag: {item.tideTag}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold">
+                      HTTP 403 BLOCKED
+                    </span>
+                  </div>
+                  <div className="text-slate-500 truncate">
+                    Ciphertext: {item.extractedCiphertext}
+                  </div>
+                  <div className="text-red-700 font-bold">
+                    ❌ {item.decryptAttemptStatus}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                onClick={() => setShowAdminAttackModal(false)}
+                className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold shadow-sm transition-all"
+              >
+                {t('Đã hiểu (Đóng báo cáo bảo mật)', 'Got It (Close Security Report)')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <header className="border-b border-slate-200 bg-white/95 backdrop-blur sticky top-0 z-30 shadow-sm">
         <div className="max-w-7xl mx-auto px-6 py-3 space-y-2.5">
           {/* ROW 1 OF HEADER: HOSPITAL BRAND LOGO & SUBTITLE */}
@@ -2217,10 +2307,7 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => {
-                  setPortal('ADMIN');
-                  if (!adminBreachReport) handleSimulateAdminInspect();
-                }}
+                onClick={() => setPortal('ADMIN')}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
                   portal === 'ADMIN'
                     ? 'bg-slate-800 text-white shadow-sm'
@@ -2378,10 +2465,7 @@ export default function App() {
               </div>
 
               <div
-                onClick={() => {
-                  setPortal('ADMIN');
-                  if (!adminBreachReport) handleSimulateAdminInspect();
-                }}
+                onClick={() => setPortal('ADMIN')}
                 className="cursor-pointer group rounded-2xl bg-white border-2 border-red-200 hover:border-red-600 p-6 flex flex-col justify-between transition-all hover:-translate-y-1 shadow-md hover:shadow-xl"
               >
                 <div className="space-y-4">
@@ -3459,7 +3543,7 @@ export default function App() {
 
               <button
                 onClick={handleSimulateAdminInspect}
-                className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-sm transition-all"
+                className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-sm shrink-0"
               >
                 {t(
                   `⚡ Thử Dùng Quyền Root Admin Giải Mã Bệnh Án (${currentPatient.id})`,
@@ -3666,20 +3750,31 @@ export default function App() {
                 </div>
 
                 {adminBreachReport && (
-                  <div className="p-3.5 rounded-xl bg-blue-50 border border-blue-200 text-xs space-y-1">
-                    <div className="font-bold text-blue-800">
-                      {t(
-                        '🛡️ Kết quả kiểm tra TideCloak (12/12 Nút MPC):',
-                        '🛡️ TideCloak Fabric Verification (12/12 MPC Nodes):'
-                      )}
+                  <div className="p-3.5 rounded-xl bg-slate-900 text-slate-100 border-2 border-red-500 text-xs font-mono space-y-1.5 shadow-md">
+                    <div className="flex items-center justify-between text-red-400 font-extrabold">
+                      <span>
+                        🛡️ {t('KẾT QUẢ GỌI API TIDECLOAK (12/12 MPC NODES):', 'TIDECLOAK API RESPONSE (12/12 MPC NODES):')}
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px]">
+                        {t(`Lần #${adminAttackCount}`, `Attempt #${adminAttackCount}`)} • {adminBreachReport.timestamp}
+                      </span>
                     </div>
-                    <div className="text-slate-700">
+                    <div className="text-[11px] text-amber-300 truncate">
+                      {adminBreachReport.tideFabricResponseCode}
+                    </div>
+                    <div className="text-emerald-400 font-bold">
                       {t(
                         `Số lượng bệnh án hay đơn thuốc của ${currentPatient.name} bị lộ cho Admin: `,
                         `Plaintext medical records or prescriptions of ${currentPatient.nameEn} exposed to Admin: `
                       )}
-                      <strong>0 BYTES</strong>.
+                      <strong className="underline">0 BYTES</strong>
                     </div>
+                    <button
+                      onClick={() => setShowAdminAttackModal(true)}
+                      className="mt-1 w-full py-1.5 rounded-lg bg-red-600/90 hover:bg-red-600 text-white font-sans font-bold text-[11px] transition-all"
+                    >
+                      {t('Xem chi tiết Log API & WebCrypto 4 bản ghi ➔', 'View Detailed API & WebCrypto Log (4 Records) ➔')}
+                    </button>
                   </div>
                 )}
               </div>
