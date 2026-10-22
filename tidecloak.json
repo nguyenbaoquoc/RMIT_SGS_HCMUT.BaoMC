@@ -1,0 +1,20 @@
+{
+  "realm": "carepass-medical-vault",
+  "auth-server-url": "http://localhost:8080",
+  "ssl-required": "external",
+  "resource": "carepass-web-client",
+  "public-client": true,
+  "confidential-port": 0,
+  "tide-fabric": {
+    "mode": "hybrid-swe-enclave",
+    "ork-quorum-threshold": "9/12",
+    "ineffable-cryptography": true,
+    "session-bound-pre": true,
+    "supported-policy-tags": [
+      "patient:101:cardiology",
+      "patient:101:orthopedics",
+      "patient:101:psychiatry",
+      "patient:101:genetics"
+    ]
+  }
+}

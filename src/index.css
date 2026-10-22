@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Hospital Clinical Light Design Tokens (White + Medical Blue + Hospital Cross Red) */
+  --hospital-bg: #F8FAFC;
+  --hospital-surface: #FFFFFF;
+  --hospital-blue-primary: #0284C7;
+  --hospital-blue-deep: #1D4ED8;
+  --hospital-blue-soft: #EFF6FF;
+  --hospital-red-cross: #DC2626;
+  --hospital-red-soft: #FEF2F2;
+  --hospital-border: #E2E8F0;
+}
+
+@layer base {
+  body {
+    background-color: var(--hospital-bg);
+    color: #0F172A;
+    @apply font-sans;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F1F5F9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
